@@ -2,9 +2,12 @@ import json
 import logging
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from websocket.handler import websocket_endpoint
+from ws_handlers.handler import websocket_endpoint
 from core.browser import BrowserController
+from core.stealth_browser import StealthBrowserController
 from core.vision_loop import run_vision_loop
+from core.vision_loop_optimized import run_vision_loop_optimized
+from core.vision_loop_computer_use import run_vision_loop_computer_use
 from config import settings
 
 from agents.coordinator import coordinator
@@ -41,17 +44,75 @@ session_service = InMemorySessionService()
 async def health():
     return {"status": "ok", "project": settings.PROJECT_ID}
 
+# Authentication Dependency
+from fastapi import Depends, HTTPException, Security, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import firebase_admin
+from firebase_admin import auth as firebase_auth
+
+security = HTTPBearer()
+
+if settings.USE_AUTH:
+    firebase_admin.initialize_app()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+    if not settings.USE_AUTH:
+        return "anonymous_user"
+    try:
+        token = credentials.credentials
+        decoded_token = firebase_auth.verify_id_token(token)
+        return decoded_token['uid']
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+def get_ws_current_user(token: str = Query(None)):
+    if not settings.USE_AUTH:
+        return "anonymous_user"
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
+    try:
+        decoded_token = firebase_auth.verify_id_token(token)
+        return decoded_token['uid']
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# Session History Routes
+from core.db import get_all_sessions, get_session
+
+@app.get("/api/sessions")
+async def list_sessions(user_id: str = Depends(get_current_user)):
+    """Returns a list of all research sessions."""
+    sessions = await get_all_sessions(user_id)
+    return {"sessions": sessions}
+
+@app.get("/api/sessions/{session_id}")
+async def fetch_session(session_id: str, user_id: str = Depends(get_current_user)):
+    """Returns the full data for a specific session."""
+    data = await get_session(session_id, user_id)
+    return {"session": data}
+
 # WebSocket route — bidirectional handler (copilot + autopilot via modes)
 @app.websocket("/ws/{session_id}")
-async def ws_route(websocket: WebSocket, session_id: str):
+async def ws_route(websocket: WebSocket, session_id: str, user_id: str = Depends(get_ws_current_user)):
+    # Store user_id on the websocket object for downstream use if needed
+    websocket.scope["user_id"] = user_id
     await websocket_endpoint(websocket, session_id)
 
 # WebSocket route — direct autopilot agent endpoint
 @app.websocket("/ws/agent")
 async def agent_websocket(websocket: WebSocket):
     await websocket.accept()
-    browser = BrowserController()
-    await browser.start()
+    
+    # Choose browser based on configuration
+    if settings.USE_STEALTH_BROWSER:
+        logger.info("🔒 Using Stealth Browser (SeleniumBase + Playwright)")
+        browser = StealthBrowserController()
+        await browser.start(headless=settings.BROWSER_HEADLESS)
+        # await browser.start()
+    else:
+        logger.info("Using Standard Browser (Playwright only)")
+        browser = BrowserController()
+        await browser.start()
 
     try:
         # Receive task from frontend
@@ -66,19 +127,30 @@ async def agent_websocket(websocket: WebSocket):
             }))
             return
 
+        browser_mode = "Stealth Mode (CAPTCHA bypass enabled)" if settings.USE_STEALTH_BROWSER else "Standard Mode"
         await websocket.send_text(json.dumps({
             "type": "status",
-            "message": f"Starting: {task}"
+            "message": f"Starting: {task} [{browser_mode}]"
         }))
 
         # Pre-navigate to Google to avoid blank screen loops
         await browser.page.goto("https://google.com", wait_until="networkidle")
         
-        # Prepend instruction to task
-        task = f"Start by navigating to https://google.com. {task}"
-
+        # Choose vision loop based on configuration
+        if settings.USE_COMPUTER_USE:
+            vision_loop = run_vision_loop_computer_use
+            loop_type = "Computer Use (native tool calls)"
+        elif settings.USE_OPTIMIZED_VISION_LOOP:
+            vision_loop = run_vision_loop_optimized
+            loop_type = "Optimized (2-try strategy)"
+        else:
+            vision_loop = run_vision_loop
+            loop_type = "Standard"
+        
+        logger.info(f"Using {loop_type} vision loop")
+        
         # Run vision loop, stream each action back
-        async for action in run_vision_loop(browser, task):
+        async for action in vision_loop(browser, task):
             await websocket.send_text(json.dumps({
                 "type": "action",
                 "data": action

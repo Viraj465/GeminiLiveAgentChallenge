@@ -19,6 +19,8 @@ class WSMessageType(str, Enum):
     BROWSER_FRAME = "browser_frame"      # live Playwright screenshot (base64)
     PING = "ping"                        # heartbeat ping from server
     ERROR = "error"
+    CACHE_STATUS = "cache_status"        # context cache lifecycle updates
+    GCS_STATUS = "gcs_status"           # GCS upload/delete updates
 
 class WSMessage(BaseModel):
     type: WSMessageType

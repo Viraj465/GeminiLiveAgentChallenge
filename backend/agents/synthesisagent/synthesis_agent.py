@@ -12,6 +12,7 @@ import logging
 from google import genai
 from google.genai import types
 from config import settings
+from prompts import SYNTHESIS_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -70,28 +71,13 @@ def synthesize_findings(extractions: list, query: str) -> dict:
             "total_chars_processed": 0,
         }
 
-    # Gemini 2.5 Pro handles up to 1M tokens
-    model_name = "gemini-2.5-pro"
+    # Use configured reasoning model (gemini-3.1-pro-preview)
+    model_name = settings.GOOGLE_REASONING_MODEL
 
-    synthesis_prompt = f"""
-    You are a research synthesis expert. Below are full texts from multiple academic papers.
-    
-    Research Query: {query}
-    
-    Analyze ALL papers and provide:
-    1. KEY FINDINGS: What are the main findings across all papers?
-    2. METHODOLOGIES: What methods do they use? How do they compare?
-    3. AGREEMENTS: Where do all papers agree?
-    4. CONTRADICTIONS: Where do papers disagree? Why?
-    5. RESEARCH GAPS: What questions remain unanswered?
-    6. TRENDS: How has this field evolved across the papers?
-    7. FIGURE INSIGHTS: If figure descriptions are provided, what do the visual data show?
-    
-    Be specific. Cite paper numbers when referencing. Be thorough.
-    
-    PAPERS:
-    {combined_text[:900000]}
-    """
+    synthesis_prompt = SYNTHESIS_PROMPT_TEMPLATE.format(
+        query=query,
+        combined_text=combined_text[:900000]
+    )
 
     try:
         response = client.models.generate_content(

@@ -10,6 +10,12 @@ import { auth, loginWithGoogle, logoutUser } from './firebase'
 import { onAuthStateChanged } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 
+const API_BASE_URL = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://localhost:8000').replace(/\/+$/, '')
+const WS_BASE_URL = (
+  (import.meta.env.VITE_WS_BASE_URL as string | undefined) ||
+  API_BASE_URL.replace(/^http/i, 'ws')
+).replace(/\/+$/, '')
+
 
 interface ChatMsg {
   type: 'user' | 'thought' | 'guidance' | 'action' | 'status' | 'log' | 'error'
@@ -66,7 +72,7 @@ function App({ user }: { user: User }) {
   const fetchSessionsList = useCallback(async () => {
     try {
       const token = await user.getIdToken();
-      fetch('http://localhost:8000/api/sessions', {
+      fetch(`${API_BASE_URL}/api/sessions`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -99,7 +105,7 @@ function App({ user }: { user: User }) {
 
     try {
       const token = await user.getIdToken();
-      fetch(`http://localhost:8000/api/sessions/${id}`, {
+      fetch(`${API_BASE_URL}/api/sessions/${id}`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -127,7 +133,7 @@ function App({ user }: { user: User }) {
 
     try {
       const token = await user.getIdToken();
-      const WS_URL = `ws://localhost:8000/ws/${sessionId}?token=${token}`
+      const WS_URL = `${WS_BASE_URL}/ws/${sessionId}?token=${encodeURIComponent(token)}`
       const ws = new WebSocket(WS_URL)
       wsRef.current = ws
 

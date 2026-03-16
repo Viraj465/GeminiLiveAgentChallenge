@@ -13,7 +13,7 @@ Features:
 """
 
 from fastapi import WebSocket, WebSocketDisconnect
-from websocket.models import WSMessage, WSMessageType
+from ws_handlers.models import WSMessage, WSMessageType
 from core.copilot.copilot_mode import analyze_frame, set_user_command, cleanup_session
 # Import active_browsers registry to allow manual overrides
 from core.autopilot.autopilot_mode import run_autopilot, active_browsers
@@ -26,9 +26,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════
+
 #  Connection Manager
-# ═══════════════════════════════════════════════
+
 
 class ConnectionManager:
     """Manages active WebSocket connections per session."""
@@ -40,6 +40,7 @@ class ConnectionManager:
         self._session_commands: dict[str, str] = {}         # current user command
         self._autopilot_tasks: dict[str, asyncio.Task] = {} # running autopilot tasks
         self._autopilot_pause_events: dict[str, asyncio.Event] = {} # pause events for ask_user
+        self._session_task_history: dict[str, list[str]] = {}  # ordered list of past tasks per session
 
     async def connect(self, session_id: str, websocket: WebSocket):
         """Accept and register a new WebSocket connection."""
@@ -64,12 +65,29 @@ class ConnectionManager:
         autopilot = self._autopilot_tasks.pop(session_id, None)
         if autopilot and not autopilot.done():
             autopilot.cancel()
+            try:
+                await asyncio.wait_for(autopilot, timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                logger.warning(f"Session {session_id}: autopilot cancel timed out during disconnect")
+            except Exception as e:
+                logger.warning(f"Session {session_id}: autopilot cancel raised during disconnect: {e}")
             
         self._autopilot_pause_events.pop(session_id, None)
+
+        # Close any browser left open by a completed autopilot run.
+        browser_ctrl = active_browsers.pop(session_id, None)
+        if browser_ctrl:
+            try:
+                await browser_ctrl.close()
+            except Exception as e:
+                logger.warning(f"Session {session_id}: failed to close browser during disconnect: {e}")
 
         # Clean up session state
         self._session_modes.pop(session_id, None)
         self._session_commands.pop(session_id, None)
+        self._session_task_history.pop(session_id, None)
         cleanup_session(session_id)
 
         ws = self.active_connections.pop(session_id, None)
@@ -149,9 +167,9 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# ═══════════════════════════════════════════════
+
 #  WebSocket Endpoint
-# ═══════════════════════════════════════════════
+
 
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """
@@ -223,9 +241,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         await manager.disconnect(session_id, reason="Handler exited")
 
 
-# ═══════════════════════════════════════════════
+
 #  Message Handlers
-# ═══════════════════════════════════════════════
+
 
 async def handle_screen_frame(session_id: str, msg: WSMessage):
     """Process incoming screenshot frame — route to copilot vision analysis."""
@@ -310,17 +328,46 @@ async def handle_user_command(session_id: str, msg: WSMessage):
                 existing.cancel()
                 await asyncio.sleep(0.1)
 
+            # ── Conversation memory: accumulate task history per session ──
+            # Each new command is appended to the session's task history so that
+            # run_autopilot can pass the full context to the vision loop, allowing
+            # Gemini to understand what was already researched and continue from there.
+            history = manager._session_task_history.setdefault(session_id, [])
+            history.append(command)
+            prior_tasks = history[:-1]  # All tasks before the current one
+
             # Start new autopilot task
             pause_event = asyncio.Event()
             manager._autopilot_pause_events[session_id] = pause_event
-            # Pass session_id to run_autopilot so it can register the browser
-            task = asyncio.create_task(run_autopilot(session_id, command, ws, pause_event=pause_event))
+            # Pass session_id and prior_tasks to run_autopilot so it can register
+            # the browser and inject conversation context into the vision loop.
+            task = asyncio.create_task(
+                run_autopilot(
+                    session_id,
+                    command,
+                    ws,
+                    pause_event=pause_event,
+                    prior_tasks=prior_tasks,
+                )
+            )
             manager._autopilot_tasks[session_id] = task
 
-            await manager.send_message(session_id, WSMessage(
-                type=WSMessageType.LOG_UPDATE,
-                payload={"log": f"Autopilot started: {command}", "timestamp": time.time()},
-            ))
+            if prior_tasks:
+                await manager.send_message(session_id, WSMessage(
+                    type=WSMessageType.LOG_UPDATE,
+                    payload={
+                        "log": (
+                            f"Continuing research session (query {len(history)}): {command}\n"
+                            f"Previous queries: {'; '.join(prior_tasks)}"
+                        ),
+                        "timestamp": time.time(),
+                    },
+                ))
+            else:
+                await manager.send_message(session_id, WSMessage(
+                    type=WSMessageType.LOG_UPDATE,
+                    payload={"log": f"Autopilot started: {command}", "timestamp": time.time()},
+                ))
 
 
 async def handle_mode_switch(session_id: str, msg: WSMessage):

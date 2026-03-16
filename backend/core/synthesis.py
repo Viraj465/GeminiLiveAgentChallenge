@@ -1,92 +1,124 @@
 """
-synthesis.py — Academic Literature Review Generator using Gemini 2.0 Flash.
+synthesis.py — Academic Literature Review Generator using Gemini.
 """
 
 import asyncio
 import logging
+import os
 from google import genai
 from google.genai import types
 from config import settings
+from prompts import REPORT_PROMPT_TEMPLATE
+
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """
-You are an expert academic researcher and writer.
-You will be provided with the raw extracted text from several academic papers on a specific topic.
-Your task is to synthesize these papers into a comprehensive, professional Literature Review in Markdown format.
 
-Your literature review MUST include:
-1. **Introduction**: A clear overview of the topic and the scope of the papers provided.
-2. **Thematic Analysis**: Group the findings by themes or methodologies, rather than just listing papers one by one.
-3. **Methodology Comparison**: Compare and contrast the different approaches or methods used in the provided papers.
-4. **Conclusion & Future Directions**: Summarize the current state of the field based on these papers and identify gaps or future research directions.
+def _get_client():
+    """Get a Gemini/Vertex AI client for synthesis."""
+    from dotenv import load_dotenv
+    load_dotenv()
 
-Rules:
-- Format the output strictly in Markdown.
-- Use proper heading hierarchies (#, ##, ###).
-- Cite the papers in-text using the provided paper titles (e.g., [Title of Paper]).
-- Do NOT hallucinate information. If the provided texts do not cover a specific aspect, do not invent details.
-- Keep the tone academic, objective, and analytical.
-"""
+    project_id = settings.VERTEX_AI_PROJECT or settings.PROJECT_ID
+    if not project_id:
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+    location = settings.VERTEX_AI_LOCATION or "global"
+
+    if project_id:
+        return genai.Client(vertexai=True, project=project_id, location=location)
+
+    api_key = settings.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if api_key:
+        return genai.Client(api_key=api_key)
+
+    raise EnvironmentError("No Gemini API credentials available for synthesis")
 
 
-async def generate_literature_review(topic: str, extracted_texts: dict[str, str]) -> str:
+async def generate_literature_review(
+    topic: str,
+    extracted_texts: dict[str, str],
+    synthesis: str = "",
+    graph: dict = None,
+) -> str:
     """
-    ADK Tool: Generates a literature review from a dictionary of academic texts.
-    Takes a 'topic' string and a dictionary mapping 'Paper Title' to 'Raw Extracted Text'.
-    Returns a Markdown formatted string.
+    Generates a publication-ready literature review using REPORT_PROMPT_TEMPLATE.
+
+    Args:
+        topic:           The research query / topic string.
+        extracted_texts: Mapping of 'Paper Title' → 'Raw Extracted Text'.
+        synthesis:       Optional pre-computed synthesis from synthesize_findings().
+                         If provided, it is passed directly into the report prompt
+                         instead of re-synthesising from raw text.
+        graph:           Optional citation graph dict with 'edge_count' key.
+
+    Returns:
+        Markdown-formatted literature review string.
     """
     if not extracted_texts:
         return "No text provided to generate a literature review."
 
-    api_key = settings.GEMINI_API_KEY
-    if not api_key:
-        logger.error("GOOGLE_API_KEY is not set.")
-        return "Error: GOOGLE_API_KEY not configured."
+    try:
+        client = _get_client()
+    except EnvironmentError as e:
+        logger.error(str(e))
+        return f"Error: {e}"
+
+    # Use a model from settings
+    model_name = (
+        settings.GOOGLE_REPORT_MODEL
+        if hasattr(settings, "GOOGLE_REPORT_MODEL")
+        else "gemini-2.5-pro"
+    )
+
+    paper_count = len(extracted_texts)
+    edge_count = (graph or {}).get("edge_count", 0)
+
+    # If no pre-computed synthesis was passed, build a combined text block
+    # so the report prompt still has something meaningful in {synthesis}.
+    if not synthesis:
+        combined_parts = []
+        for i, (title, text) in enumerate(extracted_texts.items(), start=1):
+            combined_parts.append(f"[Paper {i}] {title}\n{text}")
+        synthesis = "\n\n---\n\n".join(combined_parts)
+
+    # Fill in the REPORT_PROMPT_TEMPLATE
+    user_prompt = REPORT_PROMPT_TEMPLATE.format(
+        query=topic,
+        paper_count=paper_count,
+        edge_count=edge_count,
+        synthesis=synthesis,
+    )
+
+    logger.info(
+        f"Generating literature review for '{topic}' "
+        f"({paper_count} papers, {edge_count} citation edges) …"
+    )
 
     try:
-        # Initialize the client. Under the hood, this integrates with Vertex AI if configured.
-        from core.vision_loop import _get_client
-        client = _get_client()
-        
-        # Use a model from settings
-        model_name = settings.GOOGLE_REPORT_MODEL if hasattr(settings, "GOOGLE_REPORT_MODEL") else "gemini-2.5-pro"
-
-        # Construct the user prompt with the extracted texts
-        user_prompt = f"Topic: {topic}\n\nHere are the extracted texts from the papers:\n\n"
-        
-        for title, text in extracted_texts.items():
-            user_prompt += f"--- Paper: {title} ---\n{text}\n\n"
-            
-        user_prompt += "Please generate the literature review based ONLY on the texts above."
-
-        logger.info(f"Sending {len(extracted_texts)} papers to Gemini for synthesis...")
-
-        # We use wait_for so the large extraction doesn't hang the loop infinitely
         response = await asyncio.wait_for(
             client.aio.models.generate_content(
                 model=model_name,
                 contents=[
-                    types.Content(role="user", parts=[
-                        types.Part.from_text(text=SYSTEM_PROMPT),
-                        types.Part.from_text(text=user_prompt)
-                    ])
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=user_prompt)],
+                    )
                 ],
                 config=types.GenerateContentConfig(
-                    temperature=0.2, # Low temp for factual synthesis
+                    temperature=0.2,  # Low temp for factual synthesis
                 ),
             ),
-            timeout=120.0, # Synthesis takes longer
+            timeout=180.0,  # Report generation can take longer than synthesis
         )
 
         logger.info("Successfully generated literature review.")
         return response.text.strip()
 
     except asyncio.TimeoutError:
-        error_msg = "Gemini API timed out during synthesis."
+        error_msg = "Gemini API timed out during literature review generation."
         logger.error(error_msg)
         return f"Error: {error_msg}"
-        
+
     except Exception as e:
         logger.error(f"Failed to generate literature review: {e}", exc_info=True)
         return f"Error generating literature review: {str(e)}"

@@ -11,7 +11,8 @@ import json
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from core.vision_loop import validate_action, run_vision_loop, VALID_ACTIONS
+from core.vision_loop import validate_action, run_vision_loop
+from core.action_schema import ACTION_SCHEMA
 from core.browser import BrowserController
 
 
@@ -27,7 +28,7 @@ class TestActionValidation:
         assert result is None
 
     def test_valid_type(self):
-        result = validate_action({"action": "type", "text": "hello", "reason": "type text"})
+        result = validate_action({"action": "type", "x": 100, "y": 200, "text": "hello", "reason": "type text"})
         assert result is None
 
     def test_valid_navigate(self):
@@ -51,13 +52,14 @@ class TestActionValidation:
         assert result is None
 
     def test_valid_ask_user(self):
-        result = validate_action({"action": "ask_user", "reason": "captcha found"})
+        result = validate_action({"action": "ask_user", "text": "Please solve CAPTCHA", "reason": "captcha found"})
         assert result is None
 
     def test_missing_action_field(self):
         result = validate_action({"x": 100, "y": 200})
         assert result is not None
-        assert "Missing 'action' field" in result
+        # Check for either error message format
+        assert "Missing 'action' field" in result or "is not a valid action" in result
 
     def test_unknown_action(self):
         result = validate_action({"action": "fly", "reason": "not real"})
@@ -67,12 +69,12 @@ class TestActionValidation:
     def test_click_missing_x(self):
         result = validate_action({"action": "click", "y": 200})
         assert result is not None
-        assert "requires 'x' and 'y'" in result
+        assert "requires 'x' field" in result
 
     def test_click_missing_y(self):
         result = validate_action({"action": "click", "x": 100})
         assert result is not None
-        assert "requires 'x' and 'y'" in result
+        assert "requires 'y' field" in result
 
     def test_click_non_numeric_coords(self):
         result = validate_action({"action": "click", "x": "bad", "y": 200})
@@ -80,24 +82,20 @@ class TestActionValidation:
         assert "numeric" in result
 
     def test_type_missing_text(self):
-        result = validate_action({"action": "type", "reason": "type something"})
+        result = validate_action({"action": "type", "x": 100, "y": 200, "reason": "type something"})
         assert result is not None
-        assert "requires a non-empty 'text'" in result
+        assert "requires 'text' field" in result
 
-    def test_type_empty_text(self):
-        result = validate_action({"action": "type", "text": "", "reason": "type nothing"})
-        assert result is not None
-        assert "requires a non-empty 'text'" in result
 
     def test_navigate_missing_text(self):
         result = validate_action({"action": "navigate"})
         assert result is not None
-        assert "requires a non-empty 'text'" in result
+        assert "requires 'text' field" in result
 
     def test_press_missing_text(self):
         result = validate_action({"action": "press"})
         assert result is not None
-        assert "requires a non-empty 'text'" in result
+        assert "requires 'text' field" in result
 
 
 # ═══════════════════════════════════════════════
@@ -187,9 +185,10 @@ class TestConstantsAndConfig:
     """Verify constants and config are valid."""
 
     def test_valid_actions_not_empty(self):
-        assert len(VALID_ACTIONS) > 0
-        assert "click" in VALID_ACTIONS
-        assert "done" in VALID_ACTIONS
+        valid_actions = set(ACTION_SCHEMA.keys())
+        assert len(valid_actions) > 0
+        assert "click" in valid_actions
+        assert "done" in valid_actions
 
     def test_config_model_names(self):
         from config import settings

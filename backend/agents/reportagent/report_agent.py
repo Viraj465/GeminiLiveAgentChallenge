@@ -12,6 +12,7 @@ from datetime import datetime
 from google import genai
 from google.genai import types
 from config import settings
+from prompts import REPORT_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
@@ -45,32 +46,14 @@ def generate_report(synthesis: str, citation_graph: dict, query: str) -> dict:
     """
     client = _get_client()
 
-    model_name = "gemini-2.5-pro"
+    model_name = settings.GOOGLE_REPORT_MODEL  # gemini-3.1-flash-lite-preview
 
-    report_prompt = f"""
-    You are an expert academic writer. Using the synthesis below, write a complete
-    literature review in academic style.
-    
-    Research Query: {query}
-    Papers Analyzed: {citation_graph.get('nodes', 0)}
-    Citation Relationships Found: {citation_graph.get('edges', 0)}
-    
-    SYNTHESIS:
-    {synthesis}
-    
-    Write the literature review with these sections:
-    # Literature Review: [Topic]
-    ## Abstract (150 words)
-    ## 1. Introduction
-    ## 2. Methodology of Review
-    ## 3. Key Findings
-    ## 4. Comparative Analysis
-    ## 5. Research Gaps & Future Directions
-    ## 6. Conclusion
-    ## References
-    
-    Use formal academic language. Be comprehensive. Use markdown formatting.
-    """
+    report_prompt = REPORT_PROMPT_TEMPLATE.format(
+        query=query,
+        paper_count=citation_graph.get('nodes', 0),
+        edge_count=citation_graph.get('edges', 0),
+        synthesis=synthesis
+    )
 
     try:
         response = client.models.generate_content(

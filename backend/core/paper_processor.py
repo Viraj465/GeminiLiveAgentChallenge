@@ -20,9 +20,9 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════
+
 #  Data Models
-# ═══════════════════════════════════════════════
+
 
 @dataclass
 class PaperPayload:
@@ -120,9 +120,9 @@ class ExtractedPaper:
         }
 
 
-# ═══════════════════════════════════════════════
+
 #  Tier 1 — PyMuPDF (Local, Fast, Free)
-# ═══════════════════════════════════════════════
+
 
 def _parse_pdf_date(date_str: str) -> str:
     """Convert PDF date format (D:20240115...) to ISO string."""
@@ -337,9 +337,9 @@ def extract_with_pymupdf(paper: PaperPayload) -> ExtractedPaper:
     return result
 
 
-# ═══════════════════════════════════════════════
+
 #  Tier 2 — Document AI (GCP, OCR Fallback)
-# ═══════════════════════════════════════════════
+
 
 async def extract_with_document_ai(paper: PaperPayload) -> ExtractedPaper:
     """
@@ -461,9 +461,9 @@ def _extract_docai_text(layout, full_text: str) -> str:
     return text.strip()
 
 
-# ═══════════════════════════════════════════════
+
 #  Two-Tier Orchestrator
-# ═══════════════════════════════════════════════
+
 
 async def extract_paper_content(paper: PaperPayload) -> ExtractedPaper:
     """
@@ -489,9 +489,9 @@ async def extract_paper_content(paper: PaperPayload) -> ExtractedPaper:
         return result
 
 
-# ═══════════════════════════════════════════════
+
 #  Download + Batch Processing
-# ═══════════════════════════════════════════════
+
 
 async def download_paper(
     client: httpx.AsyncClient,

@@ -12,6 +12,7 @@ import httpx
 import fitz
 import asyncio
 import logging
+import base64
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
@@ -34,26 +35,58 @@ async def fetch_pdf_bytes(client: httpx.AsyncClient, url: str) -> bytes:
         return None
 
 
-def extract_text_from_bytes(pdf_bytes: bytes) -> str:
+def extract_multimodal_from_bytes(pdf_bytes: bytes) -> dict:
     """
-    Open the bytes stream with PyMuPDF and extract raw text.
+    Extract text, figures (as base64), and tables from PDF bytes.
     Strictly adheres to: Never Write Files to Disk Rule.
     """
-    text = ""
+    results = {
+        "text": "",
+        "figures": [],  # List of {"base64": str, "page": int, "index": int}
+        "tables": []    # List of {"data": list[list], "page": int}
+    }
+    
     try:
-        # Load PDF from memory stream
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
             for page_num in range(len(doc)):
-                # extract_text("text") pulls standard textual data
-                text += doc[page_num].get_text("text") + "\n\n"
-        
-        # Clean excessive newlines/whitespace
-        cleaned_text = " ".join(text.split())
-        return cleaned_text
+                page = doc[page_num]
+                
+                # 1. Extract Text
+                results["text"] += page.get_text("text") + "\n\n"
+                
+                # 2. Extract Figures/Images
+                images = page.get_images(full=True)
+                for img_index, img in enumerate(images):
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    results["figures"].append({
+                        "base64": image_b64,
+                        "page": page_num + 1,
+                        "index": img_index,
+                        "extension": base_image["ext"]
+                    })
+
+                # 3. Detect Tables
+                try:
+                    tabs = page.find_tables()
+                    for tab_index, tab in enumerate(tabs.tables):
+                        results["tables"].append({
+                            "data": tab.extract(),
+                            "page": page_num + 1,
+                            "index": tab_index
+                        })
+                except Exception as e:
+                    logger.warning(f"Table detection failed on page {page_num+1}: {e}")
+
+        # Clean excessive newlines/whitespace for the aggregated text
+        results["text"] = " ".join(results["text"].split())
+        return results
         
     except Exception as e:
         logger.error(f"PyMuPDF failed to parse byte stream: {e}")
-        return ""
+        return results
 
 
 async def process_scraped_papers(papers: list[dict]) -> dict:
@@ -87,20 +120,20 @@ async def process_scraped_papers(papers: list[dict]) -> dict:
             pdf_bytes = await dl_task
             
             if pdf_bytes:
-                logger.info(f"Extracting text: {title} ({len(pdf_bytes)} bytes)")
+                logger.info(f"Extracting multimodal data: {title} ({len(pdf_bytes)} bytes)")
                 
-                # Execute CPU-bound PyMuPDF text extraction in thread pool to avoid blocking async loop
-                extracted_text = await asyncio.to_thread(extract_text_from_bytes, pdf_bytes)
+                # Execute CPU-bound PyMuPDF extraction in thread pool
+                extracted_data = await asyncio.to_thread(extract_multimodal_from_bytes, pdf_bytes)
                 
-                if extracted_text:
-                    results[title] = extracted_text
-                    logger.info(f"Successfully extracted {len(extracted_text)} characters from '{title}'")
+                if extracted_data["text"] or extracted_data["figures"] or extracted_data["tables"]:
+                    results[title] = extracted_data
+                    logger.info(f"Successfully extracted from '{title}': {len(extracted_data['text'])} chars, {len(extracted_data['figures'])} figures, {len(extracted_data['tables'])} tables.")
                 else:
-                    results[title] = "[Extraction Failed] No readable text found in PDF."
+                    results[title] = {"text": "[Extraction Failed]", "figures": [], "tables": []}
             else:
-                results[title] = "[Download Failed] Could not fetch PDF from URL."
+                results[title] = {"text": "[Download Failed]", "figures": [], "tables": []}
                 
-    logger.info(f"PDF processing complete. Successfully ingested {len([k for k in results.keys() if 'Failed' not in results[k]])} papers.")
+    logger.info(f"PDF processing complete. Successfully ingested {len([k for k in results.keys() if 'Failed' not in results[k]['text']])} papers.")
                 
     return {
         "status": "success",

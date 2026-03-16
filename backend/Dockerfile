@@ -1,30 +1,38 @@
 FROM python:3.11-slim
 
-# 1. Set environment variables to ensure Playwright knows where to look
+# 1. Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/bin/playwright-browsers
 
+# FIXED: Change /root/.cargo/bin to /root/.local/bin
+ENV PATH="/root/.local/bin:${PATH}"
+
 WORKDIR /app
 
-# 2. Install minimal system deps first
+# 2. Install system deps + curl to get 'uv'
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 3. Install 'uv' (Fastest Python package installer)
+ADD https://astral.sh/uv/install.sh /install.sh
+RUN chmod +x /install.sh && /install.sh && rm /install.sh
 
-# 4. Install Playwright browsers AND their system dependencies
-# We use the 'with-deps' flag to automatically pull in the 20+ Linux libs 
-# (like libnss3, libatk, etc.) that Chromium needs to run.
+# 4. Install Python dependencies using uv
+COPY requirements.txt .
+# We upgrade pip/setuptools first to avoid that 'use_2to3' error
+RUN uv pip install --system --no-cache-dir --upgrade pip setuptools wheel
+RUN uv pip install --system --no-cache-dir -r requirements.txt
+
+# 5. Install Playwright browsers AND their system dependencies
 RUN playwright install chromium --with-deps
 
 COPY . .
 
 EXPOSE 8080
 
-# 5. Start FastAPI
+# 6. Start FastAPI
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

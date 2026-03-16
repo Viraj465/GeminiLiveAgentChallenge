@@ -6,14 +6,19 @@ constants.py — Status codes, messages, and enumerations for the ResearchAgent 
 # Google Models
 # ──────────────────────────────────────────────
 GOOGLE_MODELS = [
-    "gemini-3-pro",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-pro",
+    "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-3-flash",
-    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview"
 ]
 
+# ──────────────────────────────────────────────
+# Google Computer Use Model
+# ──────────────────────────────────────────────
+GOOGLE_COMPUTER_USE_MODEL = "gemini-3-flash-preview"
+# GOOGLE_COMPUTER_USE_MODEL = "gemini-2.5-pro"
 
 # ──────────────────────────────────────────────
 # HTTP Status Codes & Messages
@@ -147,6 +152,34 @@ class AutopilotStatus:
 
 
 # ──────────────────────────────────────────────
+# Hybrid Vision Mode States
+# ──────────────────────────────────────────────
+class VisionMode:
+    """Mode transitions: SEARCHING → PAPER_CAPTURE → HANDOFF_ANALYSIS → SEARCHING"""
+    SEARCHING         = "searching"          # Browsing search results, clicking links
+    PAPER_CAPTURE     = "paper_capture"      # On a paper page, capturing bounded screenshots
+    HANDOFF_ANALYSIS  = "handoff_analysis"   # Paper capture complete, handing off to in-memory analysis
+    IDLE              = "idle"               # Not actively browsing
+
+
+class HybridAnalysisStatus:
+    CAPTURE_STARTED    = ("capture_started",    "Starting bounded screenshot capture for paper.")
+    CAPTURE_SCREENSHOT = ("capture_screenshot", "Captured screenshot for paper section.")
+    CAPTURE_COMPLETE   = ("capture_complete",   "Screenshot capture quota met — ready for handoff.")
+    HANDOFF_TRIGGERED  = ("handoff_triggered",  "Paper handed off to in-memory analysis pipeline.")
+    PDF_DOWNLOADING    = ("pdf_downloading",    "Downloading PDF into memory.")
+    PDF_EXTRACTED      = ("pdf_extracted",      "PDF text and sections extracted.")
+    CHUNKING           = ("chunking",           "Chunking paper by sections for summarization.")
+    MAP_SUMMARIZING    = ("map_summarizing",    "Running MAP step — summarizing individual chunks.")
+    REDUCE_SUMMARIZING = ("reduce_summarizing", "Running REDUCE step — combining chunk summaries.")
+    VISION_ANALYZING   = ("vision_analyzing",   "Analyzing captured screenshots with Gemini Vision.")
+    ANALYSIS_COMPLETE  = ("analysis_complete",  "Hybrid analysis complete — enriched paper ready.")
+    ANALYSIS_FAILED    = ("analysis_failed",    "Hybrid analysis failed — using fallback.")
+    BUDGET_EXHAUSTED   = ("budget_exhausted",   "Per-run call/paper budget exhausted.")
+    STAGNATION         = ("stagnation",         "No-progress stagnation detected.")
+
+
+# ──────────────────────────────────────────────
 # Document Processing (Document AI / PDF)
 # ──────────────────────────────────────────────
 class DocumentStatus:
@@ -199,3 +232,21 @@ class ErrorMessage:
     WS_CONNECTION_LOST    = "WebSocket connection lost unexpectedly."
     RATE_LIMIT_HIT        = "API rate limit reached — retrying in {} seconds."
     MAX_RETRIES_EXCEEDED  = "Maximum retry attempts exceeded."
+
+
+# ──────────────────────────────────────────────
+# Context Cache / GCS Pipeline Statuses
+# ──────────────────────────────────────────────
+class CacheStatus:
+    UPLOADING_TO_GCS  = ("uploading_to_gcs",  "Uploading PDF to Cloud Storage.")
+    GCS_READY         = ("gcs_ready",          "PDF uploaded to GCS. Preparing cache.")
+    CREATING_CACHE    = ("creating_cache",      "Loading paper into Gemini context cache.")
+    CACHE_READY       = ("cache_ready",         "Paper cached. Starting targeted extraction.")
+    EXTRACTING        = ("extracting",          "Running targeted provenance extraction queries.")
+    CACHE_DELETED     = ("cache_deleted",       "Context cache cleaned up.")
+    GCS_DELETED       = ("gcs_deleted",         "GCS object cleaned up.")
+    CACHE_FAILED      = ("cache_failed",        "Context cache creation failed — using fallback.")
+    GCS_FAILED        = ("gcs_failed",          "GCS upload failed — using fallback.")
+
+
+# Prompts removed — moved to backend/prompts.py

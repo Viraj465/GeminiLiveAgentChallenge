@@ -10,11 +10,40 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
-# 2. Install system deps + curl to get 'uv'
+# 2. Install system deps + browser runtime libs + curl to get 'uv'
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     curl \
+    ca-certificates \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libxshmfence1 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxext6 \
+    libxrender1 \
+    libglib2.0-0 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libatspi2.0-0 \
+    libgtk-3-0 \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    fonts-unifont \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. Install 'uv' (Fastest Python package installer)
@@ -27,8 +56,8 @@ COPY requirements.txt .
 RUN uv pip install --system --no-cache-dir --upgrade pip setuptools wheel
 RUN uv pip install --system --no-cache-dir -r requirements.txt
 
-# 5. Install Playwright browsers AND their system dependencies
-RUN playwright install chromium --with-deps
+# 5. Install Playwright browser (deps already installed above)
+RUN playwright install chromium
 
 COPY . .
 

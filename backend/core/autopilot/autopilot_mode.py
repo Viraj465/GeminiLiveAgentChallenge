@@ -68,36 +68,14 @@ async def run_autopilot(
         await _send_log(websocket, f"Launching browser for: {task}")
 
         if use_stealth:
-            logger.info("Autopilot: Using StealthBrowserController")
-            try:
-                browser = StealthBrowserController()
-                await browser.start(headless=settings.BROWSER_HEADLESS)
-                logger.info("✅ Stealth browser started successfully")
-            except Exception as stealth_err:
-                err_lower = str(stealth_err).lower()
-                is_binary_error = any(kw in err_lower for kw in (
-                    "chrome browser binary", "browser binary", "executable",
-                    "no such file", "not found", "cannot find", "chromedriver",
-                ))
-                logger.error(f"Stealth browser failed: {stealth_err}", exc_info=True)
-                await _send_log(
-                    websocket,
-                    f"⚠️ Stealth browser failed ({stealth_err}). "
-                    f"{'Chrome binary not found — ' if is_binary_error else ''}"
-                    f"Falling back to standard Playwright browser..."
-                )
-                # Clean up the failed stealth browser before creating a new one
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-                browser = BrowserController()
-                await browser.start(headless=settings.BROWSER_HEADLESS)
-                logger.info("✅ Fallback standard browser started successfully")
+            logger.info("Autopilot: Using StealthBrowserController (stealth-only mode)")
+            browser = StealthBrowserController()
+            await browser.start(headless=settings.BROWSER_HEADLESS)
+            logger.info("✅ Stealth browser started successfully")
         else:
             logger.info("Autopilot: Using standard BrowserController")
             browser = BrowserController()
-            await browser.start(headless=settings.BROWSER_HEADLESS)
+            await browser.start()
 
         # Register the successfully started browser
         active_browsers[session_id] = browser

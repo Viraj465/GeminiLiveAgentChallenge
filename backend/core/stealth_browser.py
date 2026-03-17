@@ -135,7 +135,22 @@ class StealthBrowserController:
             # Browser.create() is the correct async API in SeleniumBase 4.x
             # Pass browser_executable_path when we have a known binary so SeleniumBase
             # doesn't try to download Chrome at runtime inside the container.
-            create_kwargs: dict = {"headless": headless}
+            #
+            # PRODUCTION / DOCKER / CLOUD RUN CRITICAL FLAGS:
+            # --no-sandbox          : required in any container (no kernel sandbox available)
+            # --disable-dev-shm-usage: /dev/shm is tiny in Docker; use /tmp instead
+            # --disable-gpu         : no GPU in headless containers
+            # --single-process      : reduces memory footprint in constrained envs
+            create_kwargs: dict = {
+                "headless": headless,
+                "extra_chromium_args": [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-setuid-sandbox",
+                    "--disable-software-rasterizer",
+                ],
+            }
             if chromium_path:
                 create_kwargs["browser_executable_path"] = chromium_path
 

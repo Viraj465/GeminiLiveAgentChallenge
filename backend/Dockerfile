@@ -49,8 +49,8 @@ RUN apt-get update && apt-get install -y \
 # 4. Install Python dependencies using uv
 COPY requirements.txt .
 # We upgrade pip/setuptools first to avoid that 'use_2to3' error
-RUN pip install --system --no-cache-dir --upgrade pip setuptools wheel
-RUN pip install --system --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 5. Install Playwright browser (deps already installed above)
 RUN playwright install chromium

@@ -4,6 +4,15 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
+
+# --- DECLARE YOUR SPECIFIC VITE VARIABLES HERE ---
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
+ARG VITE_WS_BASE_URL
+ENV VITE_WS_BASE_URL=$VITE_WS_BASE_URL
+# -------------------------------------------------
+
 RUN npm run build
 
 # Stage 2: Serve with Nginx
@@ -11,7 +20,6 @@ FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 
 # Cloud Run serves container traffic on port 8080.
-# Define nginx server config inline so build does not depend on an external nginx.conf file.
 RUN printf "server {\n\
     listen 8080;\n\
     server_name _;\n\

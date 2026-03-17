@@ -65,9 +65,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid authentication token")
 
-def get_ws_current_user(token: str = Query(None)):
+def get_ws_current_user(websocket: WebSocket):
     if not settings.USE_AUTH:
         return "anonymous_user"
+    token = websocket.query_params.get("token")
     if not token:
         raise HTTPException(status_code=401, detail="Missing token")
     try:

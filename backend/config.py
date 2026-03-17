@@ -34,7 +34,7 @@ class Settings(BaseModel):
 
     # Browser Configuration
     USE_STEALTH_BROWSER: bool = os.getenv("USE_STEALTH_BROWSER", "true").lower() == "true"
-    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
+    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "true").lower() == "true"
     
     # Vision Loop Configuration
     USE_OPTIMIZED_VISION_LOOP: bool = os.getenv("USE_OPTIMIZED_VISION_LOOP", "true").lower() == "true"

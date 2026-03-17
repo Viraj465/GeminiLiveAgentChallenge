@@ -104,12 +104,20 @@ async def ws_route(websocket: WebSocket, session_id: str, user_id: str = Depends
 async def agent_websocket(websocket: WebSocket):
     await websocket.accept()
     
-    # Choose browser based on configuration
+    # Choose browser based on configuration, with automatic fallback
     if settings.USE_STEALTH_BROWSER:
         logger.info("🔒 Using Stealth Browser (SeleniumBase + Playwright)")
-        browser = StealthBrowserController()
-        await browser.start(headless=settings.BROWSER_HEADLESS)
-        # await browser.start()
+        try:
+            browser = StealthBrowserController()
+            await browser.start(headless=settings.BROWSER_HEADLESS)
+        except Exception as stealth_err:
+            logger.warning(f"Stealth browser failed: {stealth_err}. Falling back to standard browser.")
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "message": "⚠️ Stealth browser unavailable — using standard browser."
+            }))
+            browser = BrowserController()
+            await browser.start()
     else:
         logger.info("Using Standard Browser (Playwright only)")
         browser = BrowserController()

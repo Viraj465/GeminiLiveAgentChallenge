@@ -13,15 +13,21 @@ ENV PATH="/root/.local/bin:${PATH}"
 ENV SB_BINARY_LOCATION=/usr/bin/chromium
 ENV CHROME_EXECUTABLE_PATH=/usr/bin/chromium
 
+# Cloud Run / Docker: Chromium needs a writable /tmp for crash dumps and user data.
+# Also disable GPU and sandbox at the env level so every Chrome invocation inherits them.
+ENV CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --single-process --no-zygote"
+ENV DBUS_SESSION_BUS_ADDRESS="unix:path=/dev/null"
+
 WORKDIR /app
 
-# 2. Install system deps + Chromium browser + all runtime libs
+# 2. Install system deps + Chromium browser + all runtime libs + dbus for Chrome
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     curl \
     ca-certificates \
     chromium \
+    dbus \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -52,21 +58,25 @@ RUN apt-get update && apt-get install -y \
     fonts-unifont \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Verify Chromium is available and print its path (fails build if missing)
+# 3. Create a larger /dev/shm alternative for Chromium (Cloud Run has tiny /dev/shm)
+# Chromium uses shared memory for rendering; without this it crashes on Cloud Run.
+RUN mkdir -p /tmp/shm && chmod 1777 /tmp/shm
+
+# 4. Verify Chromium is available and print its path (fails build if missing)
 RUN which chromium && chromium --version
 
-# 4. Install Python dependencies
+# 5. Install Python dependencies
 COPY requirements.txt .
 # We upgrade pip/setuptools first to avoid that 'use_2to3' error
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-# 5. Install Playwright's Chromium browser (uses the same binary path)
+# 6. Install Playwright's Chromium browser (uses the same binary path)
 RUN playwright install chromium
 
 COPY . .
 
 EXPOSE 8080
 
-# 6. Start FastAPI
+# 7. Start FastAPI
 CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}

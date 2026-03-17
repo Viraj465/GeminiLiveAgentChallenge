@@ -108,97 +108,236 @@ class StealthBrowserController:
         Production fix: detects the system Chromium binary via _find_chromium_binary()
         and passes it explicitly to SBBrowser.create() so SeleniumBase never tries to
         download a driver at runtime (which fails in locked-down Docker containers).
+
+        Cloud Run / Docker fallback: if SeleniumBase CDP fails (common in restricted
+        container environments like Cloud Run where /dev/shm is tiny and process
+        sandboxing is limited), automatically falls back to Playwright-only mode
+        with stealth patches applied. This ensures the browser always starts.
         """
+        # ── Attempt 1: SeleniumBase CDP (maximum stealth) ──
         try:
-            # Import SeleniumBase cdp_driver Browser class
-            try:
-                from seleniumbase.undetected.cdp_driver.browser import Browser as SBBrowser
-            except ImportError:
-                logger.error("SeleniumBase not installed or cdp_driver not found. Install with: pip install seleniumbase")
-                raise ImportError("SeleniumBase is required for stealth mode")
+            await self._start_seleniumbase_cdp(headless)
+            return self
+        except Exception as e:
+            logger.warning(
+                f"SeleniumBase CDP failed: {e}. "
+                "Falling back to Playwright-only stealth mode (Cloud Run compatible)."
+            )
+            # Clean up any partial state from the failed attempt
+            await self._cleanup_partial()
 
-            # ── Locate Chromium binary (critical for Docker / production) ──
-            chromium_path = _find_chromium_binary()
-            if chromium_path:
-                logger.info(f"Stealth browser: using Chromium at {chromium_path}")
-            else:
-                logger.warning(
-                    "Stealth browser: no Chromium binary found — "
-                    "SeleniumBase will attempt to auto-download (may fail in production). "
-                    "Set SB_BINARY_LOCATION env var or install chromium via apt."
-                )
+        # ── Attempt 2: Playwright-only with stealth patches (Cloud Run safe) ──
+        try:
+            await self._start_playwright_stealth(headless)
+            return self
+        except Exception as e2:
+            logger.error(f"Playwright stealth fallback also failed: {e2}", exc_info=True)
+            await self._cleanup_partial()
+            raise
 
-            logger.info("Starting SeleniumBase cdp_driver (WebDriver-less stealth browser)...")
-
-            # Step 1: Launch SeleniumBase browser in CDP mode (no WebDriver/Chromedriver)
-            # This is the most stealthy mode available.
-            # Browser.create() is the correct async API in SeleniumBase 4.x
-            # Pass browser_executable_path when we have a known binary so SeleniumBase
-            # doesn't try to download Chrome at runtime inside the container.
-            #
-            # PRODUCTION / DOCKER / CLOUD RUN CRITICAL FLAGS:
-            # --no-sandbox          : required in any container (no kernel sandbox available)
-            # --disable-dev-shm-usage: /dev/shm is tiny in Docker; use /tmp instead
-            # --disable-gpu         : no GPU in headless containers
-            # --single-process      : reduces memory footprint in constrained envs
-            create_kwargs: dict = {
-                "headless": headless,
-                "extra_chromium_args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-setuid-sandbox",
-                    "--disable-software-rasterizer",
-                ],
-            }
-            if chromium_path:
-                create_kwargs["browser_executable_path"] = chromium_path
-
-            self.sb_driver = await SBBrowser.create(**create_kwargs)
-
-            # Step 2: Get the CDP endpoint URL
-            # websocket_url is a property returning the webSocketDebuggerUrl
-            self._cdp_url = self.sb_driver.websocket_url
-            logger.info(f"CDP Stealth endpoint: {self._cdp_url}")
-
-            # Step 3: Connect Playwright to the running stealthy browser
-            logger.info("Connecting Playwright to CDP Stealth browser...")
-            self._playwright = await async_playwright().start()
-
-            self.browser = await self._playwright.chromium.connect_over_cdp(
-                endpoint_url=self._cdp_url
+    async def _start_seleniumbase_cdp(self, headless: bool):
+        """
+        Primary launch path: SeleniumBase CDP + Playwright overlay.
+        Maximum anti-bot evasion but requires a working Chrome/Chromium
+        process with full CDP support (may fail on Cloud Run).
+        """
+        # Import SeleniumBase cdp_driver Browser class
+        try:
+            from seleniumbase.undetected.cdp_driver.browser import Browser as SBBrowser
+        except ImportError:
+            raise ImportError(
+                "SeleniumBase not installed or cdp_driver not found. "
+                "Install with: pip install seleniumbase"
             )
 
-            # Get the default context and page
-            contexts = self.browser.contexts
-            if contexts:
-                self.context = contexts[0]
-                pages = self.context.pages
-                if pages:
-                    self.page = pages[0]
-                else:
-                    self.page = await self.context.new_page()
+        # ── Locate Chromium binary (critical for Docker / production) ──
+        chromium_path = _find_chromium_binary()
+        if chromium_path:
+            logger.info(f"Stealth browser: using Chromium at {chromium_path}")
+        else:
+            logger.warning(
+                "Stealth browser: no Chromium binary found — "
+                "SeleniumBase will attempt to auto-download (may fail in production). "
+                "Set SB_BINARY_LOCATION env var or install chromium via apt."
+            )
+
+        logger.info("Starting SeleniumBase cdp_driver (WebDriver-less stealth browser)...")
+
+        # PRODUCTION / DOCKER / CLOUD RUN CRITICAL FLAGS:
+        create_kwargs: dict = {
+            "headless": headless,
+            "sandbox": False,
+            "extra_chromium_args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-setuid-sandbox",
+                "--disable-software-rasterizer",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--no-first-run",
+                "--no-zygote",
+                "--single-process",
+                "--disable-features=VizDisplayCompositor",
+                "--shm-size=128m",
+            ],
+        }
+        if chromium_path:
+            create_kwargs["browser_executable_path"] = chromium_path
+
+        self.sb_driver = await SBBrowser.create(**create_kwargs)
+
+        # Get the CDP endpoint URL
+        self._cdp_url = self.sb_driver.websocket_url
+        logger.info(f"CDP Stealth endpoint: {self._cdp_url}")
+
+        # Connect Playwright to the running stealthy browser
+        logger.info("Connecting Playwright to CDP Stealth browser...")
+        self._playwright = await async_playwright().start()
+
+        self.browser = await self._playwright.chromium.connect_over_cdp(
+            endpoint_url=self._cdp_url
+        )
+
+        # Get the default context and page
+        contexts = self.browser.contexts
+        if contexts:
+            self.context = contexts[0]
+            pages = self.context.pages
+            if pages:
+                self.page = pages[0]
             else:
-                self.context = await self.browser.new_context()
                 self.page = await self.context.new_page()
+        else:
+            self.context = await self.browser.new_context()
+            self.page = await self.context.new_page()
 
-            # Set viewport
-            await self.page.set_viewport_size({"width": 1280, "height": 800})
+        # Set viewport
+        await self.page.set_viewport_size({"width": 1280, "height": 800})
 
-            # Handle new tabs
-            self.context.on("page", self._on_page_created)
+        # Handle new tabs
+        self.context.on("page", self._on_page_created)
 
-            logger.info("✅ CDP Stealth browser started (No WebDriver + Playwright)")
-            logger.info(f"   - Headless: {headless}")
-            logger.info(f"   - Binary:   {chromium_path or 'auto-detected by SeleniumBase'}")
-            logger.info("   - Anti-bot evasion: MAXIMUM")
+        logger.info("✅ CDP Stealth browser started (No WebDriver + Playwright)")
+        logger.info(f"   - Headless: {headless}")
+        logger.info(f"   - Binary:   {chromium_path or 'auto-detected by SeleniumBase'}")
+        logger.info("   - Anti-bot evasion: MAXIMUM")
 
-            return self
+    async def _start_playwright_stealth(self, headless: bool):
+        """
+        Fallback launch path: Playwright-only with stealth patches.
+        Works reliably on Cloud Run / Docker / any restricted container.
+        Provides good (not maximum) anti-bot evasion via playwright-stealth
+        and custom Chrome flags that mask automation signals.
+        """
+        logger.info("Starting Playwright-only stealth browser (Cloud Run fallback)...")
 
-        except Exception as e:
-            logger.error(f"Failed to start CDP stealth browser: {e}", exc_info=True)
-            await self.close()
-            raise
+        chromium_path = _find_chromium_binary()
+
+        self._playwright = await async_playwright().start()
+
+        # Chrome flags that reduce bot-detection fingerprint
+        stealth_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-setuid-sandbox",
+            "--disable-software-rasterizer",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1280,800",
+        ]
+
+        launch_kwargs = {
+            "headless": headless,
+            "args": stealth_args,
+        }
+        if chromium_path:
+            launch_kwargs["executable_path"] = chromium_path
+
+        self.browser = await self._playwright.chromium.launch(**launch_kwargs)
+
+        self.context = await self.browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            java_script_enabled=True,
+        )
+
+        # Apply playwright-stealth patches if available
+        try:
+            from playwright_stealth import stealth_async
+            self.page = await self.context.new_page()
+            await stealth_async(self.page)
+            logger.info("   - playwright-stealth patches applied")
+        except ImportError:
+            self.page = await self.context.new_page()
+            logger.info("   - playwright-stealth not available, using flag-based evasion only")
+
+        # Inject anti-detection JS overrides into every frame
+        await self.context.add_init_script("""
+            // Override navigator.webdriver
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // Override chrome.runtime to look like a real browser
+            window.chrome = { runtime: {} };
+            // Override permissions query
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) =>
+                parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery(parameters);
+            // Override plugins length
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+            });
+            // Override languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en'],
+            });
+        """)
+
+        await self.page.set_viewport_size({"width": 1280, "height": 800})
+
+        # Handle new tabs
+        self.context.on("page", self._on_page_created)
+
+        logger.info("✅ Playwright stealth browser started (Cloud Run fallback)")
+        logger.info(f"   - Headless: {headless}")
+        logger.info(f"   - Binary:   {chromium_path or 'Playwright bundled Chromium'}")
+        logger.info("   - Anti-bot evasion: MODERATE (stealth patches + flag masking)")
+
+    async def _cleanup_partial(self):
+        """Clean up any partially initialized state from a failed start attempt."""
+        try:
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+        except Exception:
+            pass
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+                self._playwright = None
+        except Exception:
+            pass
+        try:
+            if self.sb_driver:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.sb_driver.stop)
+                self.sb_driver = None
+        except Exception:
+            pass
+        self.context = None
+        self.page = None
+        self._cdp_url = None
     
     async def _on_page_created(self, page: Page):
         """Automatically switch focus to newly opened tabs."""

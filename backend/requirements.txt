@@ -1,6 +1,6 @@
 
 # ─── Web Server ───────────────────────────
-fastapi==0.115.5
+fastapi>=0.124.1
 uvicorn==0.30.0
 websockets>=13.0
 python-multipart==0.0.9

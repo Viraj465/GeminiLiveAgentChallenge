@@ -22,12 +22,56 @@ Optimizations (v2):
 import asyncio
 import base64
 import logging
+import os
+import shutil
 import time
 from io import BytesIO
 from PIL import Image, ImageChops
 from playwright.async_api import async_playwright, Page, Browser, Playwright
 
 logger = logging.getLogger(__name__)
+
+
+def _find_chromium_binary() -> str | None:
+    """
+    Locate the Chromium/Chrome binary on the current system.
+
+    Search order:
+      1. SB_BINARY_LOCATION / CHROME_EXECUTABLE_PATH env vars  (set in Dockerfile)
+      2. Common Linux paths used by Debian/Ubuntu packages
+      3. shutil.which() for anything on PATH
+
+    Returns the first path that exists, or None if nothing is found.
+    """
+    # 1. Explicit env-var overrides (set in Dockerfile for production)
+    for env_var in ("SB_BINARY_LOCATION", "CHROME_EXECUTABLE_PATH"):
+        path = os.environ.get(env_var, "")
+        if path and os.path.isfile(path):
+            logger.info(f"Chromium binary from env {env_var}: {path}")
+            return path
+
+    # 2. Well-known fixed paths (Debian/Ubuntu apt packages)
+    fixed_paths = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/local/bin/chromium",
+    ]
+    for path in fixed_paths:
+        if os.path.isfile(path):
+            logger.info(f"Chromium binary found at: {path}")
+            return path
+
+    # 3. PATH lookup
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
+        path = shutil.which(name)
+        if path:
+            logger.info(f"Chromium binary found via PATH ({name}): {path}")
+            return path
+
+    logger.warning("No Chromium binary found on this system.")
+    return None
 
 # ─── Screenshot timeout tiers ───
 # PDF/heavy pages: use a short timeout + instant capture (no font wait)
@@ -60,6 +104,10 @@ class StealthBrowserController:
     async def start(self, headless: bool = True):
         """
         Launch stealthy browser using SeleniumBase cdp_driver (WebDriver-less mode) + Playwright.
+
+        Production fix: detects the system Chromium binary via _find_chromium_binary()
+        and passes it explicitly to SBBrowser.create() so SeleniumBase never tries to
+        download a driver at runtime (which fails in locked-down Docker containers).
         """
         try:
             # Import SeleniumBase cdp_driver Browser class
@@ -68,16 +116,31 @@ class StealthBrowserController:
             except ImportError:
                 logger.error("SeleniumBase not installed or cdp_driver not found. Install with: pip install seleniumbase")
                 raise ImportError("SeleniumBase is required for stealth mode")
-            
+
+            # ── Locate Chromium binary (critical for Docker / production) ──
+            chromium_path = _find_chromium_binary()
+            if chromium_path:
+                logger.info(f"Stealth browser: using Chromium at {chromium_path}")
+            else:
+                logger.warning(
+                    "Stealth browser: no Chromium binary found — "
+                    "SeleniumBase will attempt to auto-download (may fail in production). "
+                    "Set SB_BINARY_LOCATION env var or install chromium via apt."
+                )
+
             logger.info("Starting SeleniumBase cdp_driver (WebDriver-less stealth browser)...")
-            
+
             # Step 1: Launch SeleniumBase browser in CDP mode (no WebDriver/Chromedriver)
             # This is the most stealthy mode available.
             # Browser.create() is the correct async API in SeleniumBase 4.x
-            self.sb_driver = await SBBrowser.create(
-                headless=headless,
-            )
-            
+            # Pass browser_executable_path when we have a known binary so SeleniumBase
+            # doesn't try to download Chrome at runtime inside the container.
+            create_kwargs: dict = {"headless": headless}
+            if chromium_path:
+                create_kwargs["browser_executable_path"] = chromium_path
+
+            self.sb_driver = await SBBrowser.create(**create_kwargs)
+
             # Step 2: Get the CDP endpoint URL
             # websocket_url is a property returning the webSocketDebuggerUrl
             self._cdp_url = self.sb_driver.websocket_url
@@ -86,11 +149,11 @@ class StealthBrowserController:
             # Step 3: Connect Playwright to the running stealthy browser
             logger.info("Connecting Playwright to CDP Stealth browser...")
             self._playwright = await async_playwright().start()
-            
+
             self.browser = await self._playwright.chromium.connect_over_cdp(
                 endpoint_url=self._cdp_url
             )
-            
+
             # Get the default context and page
             contexts = self.browser.contexts
             if contexts:
@@ -103,19 +166,20 @@ class StealthBrowserController:
             else:
                 self.context = await self.browser.new_context()
                 self.page = await self.context.new_page()
-            
+
             # Set viewport
             await self.page.set_viewport_size({"width": 1280, "height": 800})
-            
+
             # Handle new tabs
             self.context.on("page", self._on_page_created)
-            
+
             logger.info("✅ CDP Stealth browser started (No WebDriver + Playwright)")
             logger.info(f"   - Headless: {headless}")
+            logger.info(f"   - Binary:   {chromium_path or 'auto-detected by SeleniumBase'}")
             logger.info("   - Anti-bot evasion: MAXIMUM")
-            
+
             return self
-            
+
         except Exception as e:
             logger.error(f"Failed to start CDP stealth browser: {e}", exc_info=True)
             await self.close()

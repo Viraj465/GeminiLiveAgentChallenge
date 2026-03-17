@@ -53,24 +53,54 @@ async def run_autopilot(
         except Exception as e:
             logger.warning(f"Failed closing previous browser for session {session_id}: {e}")
 
-    # Use StealthBrowserController if enabled in settings
-    if settings.USE_STEALTH_BROWSER:
-        logger.info("Autopilot: Using StealthBrowserController")
-        browser = StealthBrowserController()
-    else:
-        logger.info("Autopilot: Using standard BrowserController")
-        browser = BrowserController()
+    # Use StealthBrowserController if enabled in settings (always preferred in production)
+    use_stealth = settings.USE_STEALTH_BROWSER
+    browser = None
     completed_successfully = False
-    partial_steps_done = 0 
+    partial_steps_done = 0
 
-    
     # Register this browser so the websocket handler can access it for manual clicks
-    active_browsers[session_id] = browser
+    # (will be updated once the browser is successfully created)
+    active_browsers[session_id] = None  # placeholder
 
     try:
-        # 1. Launch browser
+        # 1. Launch browser — stealth mode with automatic fallback to standard mode
         await _send_log(websocket, f"Launching browser for: {task}")
-        await browser.start(headless=settings.BROWSER_HEADLESS)
+
+        if use_stealth:
+            logger.info("Autopilot: Using StealthBrowserController")
+            try:
+                browser = StealthBrowserController()
+                await browser.start(headless=settings.BROWSER_HEADLESS)
+                logger.info("✅ Stealth browser started successfully")
+            except Exception as stealth_err:
+                err_lower = str(stealth_err).lower()
+                is_binary_error = any(kw in err_lower for kw in (
+                    "chrome browser binary", "browser binary", "executable",
+                    "no such file", "not found", "cannot find", "chromedriver",
+                ))
+                logger.error(f"Stealth browser failed: {stealth_err}", exc_info=True)
+                await _send_log(
+                    websocket,
+                    f"⚠️ Stealth browser failed ({stealth_err}). "
+                    f"{'Chrome binary not found — ' if is_binary_error else ''}"
+                    f"Falling back to standard Playwright browser..."
+                )
+                # Clean up the failed stealth browser before creating a new one
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                browser = BrowserController()
+                await browser.start(headless=settings.BROWSER_HEADLESS)
+                logger.info("✅ Fallback standard browser started successfully")
+        else:
+            logger.info("Autopilot: Using standard BrowserController")
+            browser = BrowserController()
+            await browser.start(headless=settings.BROWSER_HEADLESS)
+
+        # Register the successfully started browser
+        active_browsers[session_id] = browser
         await _send_log(websocket, "Browser ready")
 
         # Send initial blank screenshot
@@ -382,6 +412,11 @@ async def run_autopilot(
         return {"status": "error", "message": str(e)}
 
     finally:
+        # Guard: browser may be None if launch itself failed before assignment
+        if browser is None:
+            active_browsers.pop(session_id, None)
+            return
+
         # Keep browser open if task succeeded OR if agent made meaningful progress
         keep_open = (completed_successfully or partial_steps_done > 3) and keep_browser_open_on_success
         if keep_open:
@@ -389,7 +424,10 @@ async def run_autopilot(
         else:
             if active_browsers.get(session_id) is browser:
                 active_browsers.pop(session_id, None)
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception as e:
+                logger.warning(f"Error closing browser in finally block: {e}")
 
 
 # ═══════════════════════════════════════════════

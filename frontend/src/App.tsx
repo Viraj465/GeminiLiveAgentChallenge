@@ -10,7 +10,8 @@ import { auth, loginWithGoogle, logoutUser } from './firebase'
 import { onAuthStateChanged } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 
-// Env variables
+// 
+//updated Env variables
 const API_BASE_URL = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || 'https://geminiliveagentchallenge-355876710746.us-central1.run.app').replace(/\/+$/, '')
 // const WS_BASE_URL = (
 //   (import.meta.env.VITE_WS_BASE_URL as string | undefined) ||

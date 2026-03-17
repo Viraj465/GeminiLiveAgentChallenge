@@ -10,7 +10,8 @@ import { auth, loginWithGoogle, logoutUser } from './firebase'
 import { onAuthStateChanged } from 'firebase/auth'
 import type { User } from 'firebase/auth'
 
-const API_BASE_URL = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://localhost:8000').replace(/\/+$/, '')
+// Env variables
+const API_BASE_URL = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://localhost:8080').replace(/\/+$/, '')
 const WS_BASE_URL = (
   (import.meta.env.VITE_WS_BASE_URL as string | undefined) ||
   API_BASE_URL.replace(/^http/i, 'ws')

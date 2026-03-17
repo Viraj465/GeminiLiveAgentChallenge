@@ -8,14 +8,20 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/bin/playwright-browsers
 # FIXED: Change /root/.cargo/bin to /root/.local/bin
 ENV PATH="/root/.local/bin:${PATH}"
 
+# Tell SeleniumBase / undetected-chromedriver to use the system Chromium binary
+# so it never tries to download a driver at runtime (no network access needed).
+ENV SB_BINARY_LOCATION=/usr/bin/chromium
+ENV CHROME_EXECUTABLE_PATH=/usr/bin/chromium
+
 WORKDIR /app
 
-# 2. Install system deps + browser runtime libs + curl to get 'uv'
+# 2. Install system deps + Chromium browser + all runtime libs
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     curl \
     ca-certificates \
+    chromium \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -46,13 +52,16 @@ RUN apt-get update && apt-get install -y \
     fonts-unifont \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Install Python dependencies using uv
+# 3. Verify Chromium is available and print its path (fails build if missing)
+RUN which chromium && chromium --version
+
+# 4. Install Python dependencies
 COPY requirements.txt .
 # We upgrade pip/setuptools first to avoid that 'use_2to3' error
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-# 5. Install Playwright browser (deps already installed above)
+# 5. Install Playwright's Chromium browser (uses the same binary path)
 RUN playwright install chromium
 
 COPY . .

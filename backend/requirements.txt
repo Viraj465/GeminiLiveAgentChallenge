@@ -36,6 +36,6 @@ pytest
 pytest-asyncio
 opencv-python>=4.9.0.80
 numpy>=1.26.0
-seleniumbase
+seleniumbase>=4.20.0
 selenium>=4.0.0
 firebase-admin>=6.5.0

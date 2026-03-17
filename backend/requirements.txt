@@ -9,7 +9,7 @@ requests>=2.31.0
 
 # ─── Google AI ────────────────────────────
 google-genai
-google-adk
+google-adk==1.27.1
 google-cloud-aiplatform
 
 # ─── Google Cloud Services ────────────────

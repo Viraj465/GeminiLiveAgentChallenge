@@ -1,3 +1,4 @@
+import google.adk
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 from agents.searchagent.search_agent import search_papers

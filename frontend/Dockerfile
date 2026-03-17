@@ -5,11 +5,11 @@ COPY package*.json ./
 RUN npm install
 COPY . .
 
-# --- DECLARE YOUR SPECIFIC VITE VARIABLES HERE ---
-ARG VITE_API_BASE_URL
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+# ADD THE ACTUAL URLS HERE AS DEFAULTS
+ARG VITE_API_BASE_URL=https://geminiliveagentchallenge-355876710746.us-central1.run.app
+ARG VITE_WS_BASE_URL=wss://geminiliveagentchallenge-355876710746.us-central1.run.app
 
-ARG VITE_WS_BASE_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 ENV VITE_WS_BASE_URL=$VITE_WS_BASE_URL
 # -------------------------------------------------
 

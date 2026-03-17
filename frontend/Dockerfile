@@ -6,11 +6,8 @@ RUN npm install
 COPY . .
 
 # ADD THE ACTUAL URLS HERE AS DEFAULTS
-ARG VITE_API_BASE_URL=https://geminiliveagentchallenge-355876710746.us-central1.run.app
-ARG VITE_WS_BASE_URL=wss://geminiliveagentchallenge-355876710746.us-central1.run.app
-
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
-ENV VITE_WS_BASE_URL=$VITE_WS_BASE_URL
+ENV VITE_API_BASE_URL=https://geminiliveagentchallenge-355876710746.us-central1.run.app
+ENV VITE_WS_BASE_URL=wss://geminiliveagentchallenge-355876710746.us-central1.run.app
 # -------------------------------------------------
 
 RUN npm run build

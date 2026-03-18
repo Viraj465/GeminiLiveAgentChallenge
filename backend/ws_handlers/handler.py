@@ -8,7 +8,7 @@ Features:
   - Heartbeat / ping-pong (idle timeout detection)
   - Graceful cleanup via finally block
   - Copilot mode: frames → Gemini Vision → guidance downstream
-  - Autopilot mode: headless browser → vision loop → actions downstream
+  - Autopilot mode: headless browser → vision loop → actions downstre
   - Real mode dispatcher with per-session state
 """
 
@@ -40,23 +40,49 @@ class ConnectionManager:
         self._session_commands: dict[str, str] = {}         # current user command
         self._autopilot_tasks: dict[str, asyncio.Task] = {} # running autopilot tasks
         self._autopilot_pause_events: dict[str, asyncio.Event] = {} # pause events for ask_user
-        self._session_task_history: dict[str, list[str]] = {}  # ordered list of past tasks per session
+        # Task history is intentionally NOT cleared on disconnect so that
+        # conversation context survives client reconnects within the same session.
+        self._session_task_history: dict[str, list[str]] = {}
 
     async def connect(self, session_id: str, websocket: WebSocket):
-        """Accept and register a new WebSocket connection."""
-        # Reject duplicate connections for the same session
-        if session_id in self.active_connections:
-            logger.warning(f"Duplicate connection attempt for session {session_id} — closing old one")
-            await self.disconnect(session_id, reason="Replaced by new connection")
+        """Accept and register a new WebSocket connection.
 
+        IMPORTANT: websocket.accept() MUST be called before any other operation
+        on the websocket object.  We accept() first, then evict any stale
+        in-memory state for the same session_id (without touching the new WS).
+        """
+        # Accept the new connection FIRST — before any other async work.
+        # This prevents the RuntimeError "WebSocket is not connected. Need to
+        # call accept() first." that occurs when receive_text() is called on
+        # a WS that was never accepted (e.g. after a reconnect race).
         await websocket.accept()
+
+        # If a previous connection exists for this session_id, clean up its
+        # in-memory state (tasks, heartbeat, browser) WITHOUT closing the new
+        # websocket object — the old WS object is a different instance.
+        if session_id in self.active_connections:
+            old_ws = self.active_connections[session_id]
+            if old_ws is not websocket:
+                logger.warning(
+                    f"Session {session_id}: stale connection evicted — replacing with new WS"
+                )
+                await self._evict_session(session_id)
+            else:
+                # Same object — just log and continue (shouldn't normally happen)
+                logger.warning(
+                    f"Session {session_id}: connect() called twice on same WS object"
+                )
+
         self.active_connections[session_id] = websocket
-        self._session_modes[session_id] = "autopilot"  # Default mode
+        # Preserve existing mode if session is resuming; default to autopilot for new sessions
+        if session_id not in self._session_modes:
+            self._session_modes[session_id] = "autopilot"
         logger.info(f"Session {session_id} connected — {len(self.active_connections)} active")
 
-    async def disconnect(self, session_id: str, reason: str = "Disconnected"):
-        """Remove a connection and cancel its heartbeat + autopilot."""
-        # Cancel heartbeat task
+    async def _evict_session(self, session_id: str):
+        """Cancel tasks and free resources for a session WITHOUT closing the
+        registered websocket (caller is responsible for that)."""
+        # Cancel heartbeat
         task = self._heartbeat_tasks.pop(session_id, None)
         if task and not task.done():
             task.cancel()
@@ -66,14 +92,58 @@ class ConnectionManager:
         if autopilot and not autopilot.done():
             autopilot.cancel()
             try:
-                await asyncio.wait_for(autopilot, timeout=2.0)
+                await asyncio.wait_for(autopilot, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception as e:
+                logger.warning(f"Session {session_id}: evict autopilot raised: {e}")
+
+        self._autopilot_pause_events.pop(session_id, None)
+
+        # Close browser
+        browser_ctrl = active_browsers.pop(session_id, None)
+        if browser_ctrl:
+            try:
+                await browser_ctrl.close()
+            except Exception as e:
+                logger.warning(f"Session {session_id}: evict browser close failed: {e}")
+
+        # Close old WS gracefully (best-effort)
+        old_ws = self.active_connections.pop(session_id, None)
+        if old_ws:
+            try:
+                await old_ws.close(code=1000, reason="Replaced by new connection")
+            except Exception:
+                pass
+
+        # NOTE: _session_modes, _session_commands, and _session_task_history
+        # are intentionally NOT cleared here so that mode + conversation
+        # context survive reconnects within the same session.
+        cleanup_session(session_id)
+
+    async def disconnect(self, session_id: str, reason: str = "Disconnected"):
+        """Remove a connection and cancel its heartbeat + autopilot."""
+        # Cancel heartbeat task
+        task = self._heartbeat_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        # Cancel autopilot task — give it a grace period to finish its current
+        # Gemini call and flush any partial results before hard-cancelling.
+        autopilot = self._autopilot_tasks.pop(session_id, None)
+        if autopilot and not autopilot.done():
+            autopilot.cancel()
+            try:
+                # Allow up to 5 s for the task to handle CancelledError gracefully
+                # (flush logs, persist partial results, close browser cleanly).
+                await asyncio.wait_for(autopilot, timeout=5.0)
             except asyncio.CancelledError:
                 pass
             except asyncio.TimeoutError:
                 logger.warning(f"Session {session_id}: autopilot cancel timed out during disconnect")
             except Exception as e:
                 logger.warning(f"Session {session_id}: autopilot cancel raised during disconnect: {e}")
-            
+
         self._autopilot_pause_events.pop(session_id, None)
 
         # Close any browser left open by a completed autopilot run.
@@ -84,10 +154,13 @@ class ConnectionManager:
             except Exception as e:
                 logger.warning(f"Session {session_id}: failed to close browser during disconnect: {e}")
 
-        # Clean up session state
+        # Clean up transient session state.
+        # NOTE: _session_task_history is intentionally preserved so that
+        # conversation context (prior_tasks) survives client reconnects.
+        # It is only cleared when the client explicitly starts a brand-new
+        # session (different session_id) or the server restarts.
         self._session_modes.pop(session_id, None)
         self._session_commands.pop(session_id, None)
-        self._session_task_history.pop(session_id, None)
         cleanup_session(session_id)
 
         ws = self.active_connections.pop(session_id, None)
@@ -182,6 +255,62 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """
     await manager.connect(session_id, websocket)
     manager.start_heartbeat(session_id, interval=30.0)
+
+    # ── On reconnect: restore saved results + conversation history from Firestore ──
+    try:
+        from core.db import get_session
+        import time as _time
+        saved = await get_session(session_id)
+
+        # ── Restore conversation task history so prior_tasks works after restart ──
+        # If the in-memory history is empty (e.g. after a Cloud Run cold start)
+        # but Firestore has a saved query list, repopulate it so the next command
+        # correctly receives prior_tasks and continues the research thread.
+        if saved.get("task_history"):
+            existing_history = manager._session_task_history.get(session_id, [])
+            if not existing_history:
+                restored_history = saved["task_history"]
+                manager._session_task_history[session_id] = list(restored_history)
+                logger.info(
+                    f"Session {session_id}: restored task history from Firestore "
+                    f"({len(restored_history)} prior queries)"
+                )
+
+        if saved.get("report_markdown") or saved.get("graph_data"):
+            logger.info(f"Session {session_id}: replaying saved results from Firestore")
+            if saved.get("graph_data"):
+                await websocket.send_json({
+                    "type": "graph_update",
+                    "payload": {
+                        "graph_data": saved["graph_data"],
+                        "timestamp": _time.time(),
+                        "restored": True,
+                    },
+                })
+            if saved.get("report_markdown"):
+                await websocket.send_json({
+                    "type": "report_update",
+                    "payload": {
+                        "report": saved["report_markdown"],
+                        "timestamp": _time.time(),
+                        "restored": True,
+                    },
+                })
+            prior_count = len(manager._session_task_history.get(session_id, []))
+            await websocket.send_json({
+                "type": "log_update",
+                "payload": {
+                    "log": (
+                        f"✅ Previous research results restored "
+                        f"({saved.get('papers_found', 0)} papers). "
+                        f"Query: {saved.get('query', '')}"
+                        + (f" | {prior_count} prior queries in context." if prior_count else "")
+                    ),
+                    "timestamp": _time.time(),
+                },
+            })
+    except Exception as e:
+        logger.debug(f"Session {session_id}: no saved results to restore ({e})")
 
     try:
         while True:
@@ -322,11 +451,20 @@ async def handle_user_command(session_id: str, msg: WSMessage):
         # Launch autopilot task for this command
         ws = manager.active_connections.get(session_id)
         if ws:
-            # Cancel any existing autopilot task
-            existing = manager._autopilot_tasks.get(session_id)
+            # Cancel any existing autopilot task — wait for graceful shutdown
+            # before starting the new one so browsers and Gemini calls are
+            # properly cleaned up (prevents "task cancelled after N steps" logs).
+            existing = manager._autopilot_tasks.pop(session_id, None)
             if existing and not existing.done():
+                logger.info(f"Session {session_id}: cancelling previous autopilot task for new command")
                 existing.cancel()
-                await asyncio.sleep(0.1)
+                try:
+                    # Give the old task up to 5 s to flush partial results / close browser
+                    await asyncio.wait_for(asyncio.shield(existing), timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                except Exception as e:
+                    logger.warning(f"Session {session_id}: old autopilot task raised on cancel: {e}")
 
             # ── Conversation memory: accumulate task history per session ──
             # Each new command is appended to the session's task history so that

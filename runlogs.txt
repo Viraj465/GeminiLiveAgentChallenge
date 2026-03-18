@@ -1,0 +1,41 @@
+### Overview:
+Your Cloud Run service `geminiliveagentchallenge` is experiencing application logic errors related to WebSocket connections, leading to request timeouts. Specifically, the error `RuntimeError: WebSocket is not connected. Need to call "accept" first.` originating from `/app/ws_handlers/handler.py` at line 227 indicates that your application is attempting to interact with a WebSocket connection before it has been properly established. This error likely causes the application to hang or enter an unrecoverable state, resulting in the request exceeding the configured 300-second Cloud Run timeout. When the timeout is reached, Cloud Run terminates the instance, which then triggers the "Stealth browser closed" log message as part of the application's shutdown sequence,. I observed that one specific WebSocket request had a latency of 301.001135 seconds, exceeding the configured timeout, and a response size of approximately 5.3MB.
+### Recommended fixes:
+*   Review the application code in `ws_handlers/handler.py`, specifically around line 227, to ensure that `websocket.accept()` is called before any attempts to `websocket.receive_text()` or other WebSocket communication. You can visit the Cloud Run source code editor to view a Gemini suggested edit and make the fix.
+*   Implement robust error handling for WebSocket connections to gracefully manage disconnections or errors, preventing the application from hanging and timing out.
+*   Investigate why the WebSocket request had a response size of over 5MB and if this data processing can be optimized to reduce latency.
+*   If, after addressing the underlying WebSocket logic error and optimizing data processing, you find that legitimate tasks still require more than 300 seconds, consider increasing the Cloud Run request timeout,,.
+
+### Relevant links
+* [view a Gemini suggested edit and make the fix](https://console.cloud.google.com/run/detail/us-central1/geminiliveagentchallenge/source?project=project-9f6fdf50-be3b-4371-a96&investigation=0e4f65ab-c8d3-488c-b691-85afc83f8db4)
+* [Using WebSockets  |  Cloud Run Documentation  |  Google Cloud](https://cloud.google.com/run/docs/triggering/websockets)
+
+
+### Overview:
+While not the primary cause of the WebSocket issue, I observed some permission denied errors related to Firestore. Specifically, there was a count of 3 permission denied errors at `2026-03-18T15:18:53Z` and 1 at `2026-03-18T15:29:53Z`. These indicate that some parts of your application might be encountering issues when trying to access Firestore resources.
+### Recommended fixes:
+*   Investigate and resolve the observed Firestore permission denied errors to ensure all parts of your application function correctly. Check the IAM permissions for the service account associated with your Cloud Run service to ensure it has the necessary roles to access Firestore.
+
+### Overview:
+The log entry "Session 695c3089-7834-40d7-80a9-56044fb6258d disconnected: Handler exited — 0 active" indicates that a WebSocket session on the `geminiliveagentchallenge` Cloud Run service has disconnected because its handler exited,,. This could be a normal occurrence if the client intentionally closed the connection or if the application logic determined the session was complete and gracefully terminated the handler. The subsequent logs about "Copilot" session cleanup and partial results being persisted due to cancellation further support the idea of a graceful shutdown or intentional termination of the session,. However, the presence of the `RuntimeError: WebSocket is not connected. Need to call "accept" first.` suggests that while the session ultimately disconnected, the immediate trigger might not have been a perfectly graceful client-initiated closure, but rather an application error during the handling of the connection.
+### Recommended fixes:
+*   **Verify Expected Behavior:** Confirm if this disconnection behavior is expected for your application's WebSocket usage. If clients are designed to disconnect after a certain period or specific interaction, then this log entry might simply reflect normal operation.
+*   **Client-Side Logging:** Enhance client-side logging to capture the exact reasons for WebSocket disconnections from the client's perspective. This can help differentiate between intentional client closures and unexpected server-side terminations.
+*   **Application-Level Heartbeats:** Implement application-level heartbeats or ping/pong messages to detect stale or unresponsive WebSocket connections and allow for graceful closure from either the client or server side, rather than relying solely on network-level timeouts.
+
+### Relevant links
+* [Using WebSockets  |  Cloud Run Documentation  |  Google Cloud](https://cloud.google.com/run/docs/triggering/websockets)
+
+### Overview:
+The primary cause of the WebSocket disconnection for session `695c3089-7834-40d7-80a9-56044fb6258d` on the `geminiliveagentchallenge` Cloud Run service appears to be an application-level error. Specifically, a `RuntimeError: WebSocket is not connected. Need to call "accept" first.` was logged within the `websocket_endpoint` function in `ws_handlers/handler.py` at line 227. This error indicates that the application attempted to perform an operation, such as receiving data, on a WebSocket connection that was not properly established or had already been closed by the application logic. This application error directly preceded the "Session disconnected: Handler exited — 0 active" log, suggesting it triggered the disconnection.
+
+While the Cloud Run revision `geminiliveagentchallenge-00024-29d` has session affinity enabled and its instance count fluctuates, there is no evidence of Cloud Run system-level instance shutdowns or 5xx errors that would suggest a platform-related issue. The application logs also show that data was being saved to Firestore just milliseconds before the disconnection, implying the application was functional up until the point of the error,. Other logs indicate that an "Autopilot task" and a "Gemini call" were cancelled, and a "Stealth browser" component was closed around the time of the disconnection, which could be consequences of the primary WebSocket error,,.
+### Recommended fixes:
+*   **Review Application Code:** Thoroughly examine the application code for the `websocket_endpoint` function in `ws_handlers/handler.py`, specifically around line 227, to understand why the `websocket.receive_text()` call is failing with the `RuntimeError`. Ensure that `accept()` is called before attempting to receive data on the WebSocket.
+*   **WebSocket Lifecycle Management:** Verify that your application correctly handles the full lifecycle of WebSocket connections, including proper `accept()` calls and graceful closure. Ensure that `receive_text()` is only called when the WebSocket is in an established and active state.
+*   **Add Detailed Logging:** Implement more granular logging within your WebSocket handler to capture the state of the WebSocket object and any relevant events (e.g., connection establishment, `accept()` calls, incoming messages, outgoing messages, and closure attempts) to better diagnose the exact sequence of events leading to the `RuntimeError`.
+*   **Increase Request Timeout:** While not the direct cause of this specific error, if your WebSocket connections are intended to be long-lived, consider increasing the `timeoutSeconds` for your Cloud Run service to the maximum duration you would like to keep the WebSocket stream open. The current `timeoutSeconds` is 300 seconds,,. You can configure this in the Cloud Run service settings.
+*   **Client Reconnection Logic:** Ensure your WebSocket clients are designed to handle disconnections gracefully and implement robust reconnection logic. This is a general best practice for WebSocket applications, especially in environments like Cloud Run where instances can scale down or be recycled,.
+
+### Relevant links
+* [Using WebSockets  |  Cloud Run Documentation  |  Google Cloud](https://cloud.google.com/run/docs/triggering/websockets)

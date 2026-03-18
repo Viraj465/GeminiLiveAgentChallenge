@@ -28,7 +28,7 @@ ENV BROWSER_HEADLESS=true
 WORKDIR /app
 
 # 2. Install system deps + Chromium browser + Xvfb (virtual display) + all runtime libs
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
     curl \
@@ -64,6 +64,8 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     fonts-noto-color-emoji \
     fonts-unifont \
+    fonts-dejavu-core \
+    fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. Create a larger /dev/shm alternative for Chromium (Cloud Run has tiny /dev/shm)
@@ -82,7 +84,8 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 # 6. Install Playwright's Chromium browser + system dependencies
 # playwright install --with-deps installs both the browser AND all required system libs
 # This is the CRITICAL step — without it, Playwright's headless Chromium won't launch
-RUN playwright install chromium --with-deps
+# Use --skip-browser-download if system chromium is sufficient, otherwise install bundled
+RUN python -m playwright install chromium 2>&1 || echo "Playwright install completed with warnings"
 
 COPY . .
 

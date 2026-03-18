@@ -230,26 +230,28 @@ async def run_autopilot(
         # ── Tell the frontend browsing is done BEFORE slow ADK pipeline.
         # Without this, the WebSocket goes silent for 10-30s and the frontend
         # interprets the silence as a session end, resetting the UI to blank.
-        await websocket.send_json({
-            "type": "session_status",
-            "payload": {
-                "status": "synthesis_started",
-                "message": f"Browsing complete ({step_count} steps). Extracting papers & running research pipeline — please wait...",
-                "steps_completed": step_count,
-                "timestamp": time.time(),
-            },
-        })
+        if _ws_is_open(websocket):
+            await websocket.send_json({
+                "type": "session_status",
+                "payload": {
+                    "status": "synthesis_started",
+                    "message": f"Browsing complete ({step_count} steps). Extracting papers & running research pipeline — please wait...",
+                    "steps_completed": step_count,
+                    "timestamp": time.time(),
+                },
+            })
 
         # 5. [PHASE 4] Extract papers discovered during browsing
         await _send_log(websocket, "Target paper(s) located. Preparing deep extraction pipeline...")
-        await websocket.send_json({
-            "type": "gcs_status",
-            "payload": {
-                "status": "uploading_to_gcs",
-                "message": "Streaming document to Google Cloud Storage...",
-                "timestamp": time.time(),
-            },
-        })
+        if _ws_is_open(websocket):
+            await websocket.send_json({
+                "type": "gcs_status",
+                "payload": {
+                    "status": "uploading_to_gcs",
+                    "message": "Streaming document to Google Cloud Storage...",
+                    "timestamp": time.time(),
+                },
+            })
 
         # 5a. If hybrid mode captured papers, run in-memory analysis on them
         hybrid_analyzed_papers: list[dict] = []
@@ -314,24 +316,78 @@ async def run_autopilot(
             )
 
         # 6. [PHASE 4] Run the full ADK pipeline: Search → Extract → Synthesize → Citation → Report
+        # ── Pipeline keepalive: send a heartbeat every 20 s while the pipeline runs ──
+        # The ADK pipeline (PDF download + Gemini synthesis + report) can take 3-8 minutes.
+        # Without periodic messages the WebSocket goes silent, Cloud Run's 300 s request
+        # timeout fires, and the container is killed mid-synthesis.
+        # The keepalive task sends a lightweight progress ping every 20 s so the
+        # connection stays alive and the frontend shows activity.
         await _send_log(websocket, "Starting ADK research pipeline...")
-        pipeline_result = await run_adk_pipeline(
-            task=task,
-            discovered_papers=all_discovered,
-            session_id=session_id,
-            websocket=websocket,
-        )
+
+        _pipeline_keepalive_running = True
+
+        async def _pipeline_keepalive():
+            """Send periodic progress pings while the ADK pipeline is running."""
+            elapsed = 0
+            stages = [
+                "🔍 Searching academic databases…",
+                "📥 Downloading and extracting PDFs…",
+                "🧠 Synthesizing findings with Gemini…",
+                "🕸️  Building citation network…",
+                "📝 Generating literature review…",
+            ]
+            stage_idx = 0
+            try:
+                while _pipeline_keepalive_running:
+                    await asyncio.sleep(20)
+                    if not _pipeline_keepalive_running:
+                        break
+                    elapsed += 20
+                    stage_msg = stages[min(stage_idx, len(stages) - 1)]
+                    stage_idx += 1
+                    if _ws_is_open(websocket):
+                        try:
+                            await websocket.send_json({
+                                "type": "pipeline_heartbeat",
+                                "payload": {
+                                    "message": f"{stage_msg} ({elapsed}s elapsed)",
+                                    "elapsed_seconds": elapsed,
+                                    "timestamp": time.time(),
+                                },
+                            })
+                            logger.debug(f"Pipeline keepalive sent ({elapsed}s)")
+                        except Exception:
+                            break  # WebSocket closed — stop pinging
+            except asyncio.CancelledError:
+                pass
+
+        keepalive_task = asyncio.create_task(_pipeline_keepalive())
+        try:
+            pipeline_result = await run_adk_pipeline(
+                task=task,
+                discovered_papers=all_discovered,
+                session_id=session_id,
+                websocket=websocket,
+            )
+        finally:
+            _pipeline_keepalive_running = False
+            keepalive_task.cancel()
+            try:
+                await asyncio.wait_for(keepalive_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
 
         # 7. Emit graph_update to trigger CitationGraph.tsx on frontend
         graph_data = pipeline_result.get("graph_data")
         if graph_data:
-            await websocket.send_json({
-                "type": "graph_update",
-                "payload": {
-                    "graph_data": graph_data,
-                    "timestamp": time.time(),
-                },
-            })
+            if _ws_is_open(websocket):
+                await websocket.send_json({
+                    "type": "graph_update",
+                    "payload": {
+                        "graph_data": graph_data,
+                        "timestamp": time.time(),
+                    },
+                })
             await _send_log(websocket, f"Citation network: {graph_data.get('node_count', 0)} nodes, {graph_data.get('edge_count', 0)} edges.")
         else:
             await _send_log(websocket, "Citation graph could not be generated.")
@@ -339,13 +395,14 @@ async def run_autopilot(
         # 8. Emit report_update to trigger ReportViewer.tsx on frontend
         report_markdown = pipeline_result.get("report_markdown")
         if report_markdown:
-            await websocket.send_json({
-                "type": "report_update",
-                "payload": {
-                    "report": report_markdown,
-                    "timestamp": time.time(),
-                },
-            })
+            if _ws_is_open(websocket):
+                await websocket.send_json({
+                    "type": "report_update",
+                    "payload": {
+                        "report": report_markdown,
+                        "timestamp": time.time(),
+                    },
+                })
             await _send_log(websocket, f"Literature review generated ({len(report_markdown.split())} words).")
         else:
             await _send_log(websocket, "Literature review could not be generated.")
@@ -364,6 +421,24 @@ async def run_autopilot(
         await _send_complete(websocket, f"Task finished in {step_count} steps — {papers_found} papers processed")
         completed_successfully = True
 
+        # ── Persist task_history so conversation context survives container restarts ──
+        # run_adk_pipeline already saves query/graph/report; we add task_history here
+        # so the handler can restore prior_tasks on reconnect after a cold start.
+        try:
+            from core.db import save_session_data
+            from ws_handlers.handler import manager as _manager
+            full_history = _manager._session_task_history.get(session_id, [])
+            if full_history:
+                await asyncio.shield(
+                    save_session_data(session_id, "task_history", full_history)
+                )
+                logger.info(
+                    f"Session {session_id}: task_history persisted "
+                    f"({len(full_history)} queries)"
+                )
+        except Exception as persist_err:
+            logger.warning(f"Could not persist task_history: {persist_err}")
+
         return {
             "status": "success",
             "steps": step_count,
@@ -371,23 +446,36 @@ async def run_autopilot(
         }
 
     except asyncio.CancelledError:
-        # ── Bug 4 Fix: Don't silently discard progress.  Log how many steps ran,
-        # notify the frontend so it can display partial results instead of going
-        # blank, and include step count in the return dict.
         logger.info(f"Autopilot task cancelled after {partial_steps_done} steps")
+        # ── Persist whatever was collected before cancellation ──
+        # This ensures partial results survive even when a new task replaces
+        # this one or the client disconnects mid-run.
         try:
-            await _send_log(websocket, f"Session interrupted after {partial_steps_done} steps. Partial results preserved.")
-            await websocket.send_json({
-                "type": "session_status",
-                "payload": {
-                    "status": "cancelled",
-                    "steps_completed": partial_steps_done,
-                    "message": "Task was cancelled — browser kept open for inspection.",
-                    "timestamp": time.time(),
-                },
-            })
-        except Exception:
-            pass
+            from core.db import save_session_data
+            await asyncio.shield(asyncio.gather(
+                save_session_data(session_id, "query", task),
+                save_session_data(session_id, "steps_completed", partial_steps_done),
+                save_session_data(session_id, "status", "cancelled"),
+                return_exceptions=True,
+            ))
+            logger.info(f"Partial results persisted for cancelled session {session_id}")
+        except Exception as persist_err:
+            logger.warning(f"Could not persist partial results on cancel: {persist_err}")
+
+        if _ws_is_open(websocket):
+            try:
+                await _send_log(websocket, f"Session interrupted after {partial_steps_done} steps. Partial results preserved.")
+                await websocket.send_json({
+                    "type": "session_status",
+                    "payload": {
+                        "status": "cancelled",
+                        "steps_completed": partial_steps_done,
+                        "message": "Task was cancelled — browser kept open for inspection.",
+                        "timestamp": time.time(),
+                    },
+                })
+            except Exception:
+                pass
         return {"status": "cancelled", "message": "Task was cancelled", "steps": partial_steps_done}
 
     except Exception as e:
@@ -422,8 +510,20 @@ async def run_autopilot(
 #  Structured Message Senders (WSMessage format)
 # ═══════════════════════════════════════════════
 
+def _ws_is_open(websocket: WebSocket) -> bool:
+    """Check if the WebSocket connection is still open and can accept messages."""
+    try:
+        # FastAPI/Starlette WebSocket state: CONNECTING=0, CONNECTED=1, DISCONNECTED=3
+        state = websocket.client_state
+        return state.value == 1  # CONNECTED
+    except Exception:
+        return False
+
+
 async def _send_frame(websocket: WebSocket, frame_b64: str, url: str = ""):
     """Send a browser screenshot frame to the frontend."""
+    if not _ws_is_open(websocket):
+        return
     try:
         await websocket.send_json({
             "type": WSMessageType.BROWSER_FRAME,
@@ -434,11 +534,13 @@ async def _send_frame(websocket: WebSocket, frame_b64: str, url: str = ""):
             },
         })
     except Exception as e:
-        logger.warning(f"Failed to send frame: {e}")
+        logger.debug(f"Failed to send frame: {e}")
 
 
 async def _send_action(websocket: WebSocket, action: dict):
     """Send an agent action to the frontend."""
+    if not _ws_is_open(websocket):
+        return
     try:
         action_label = action.get("reason", action.get("action", ""))
         if action.get("action") == "click" and "x" in action and "y" in action:
@@ -453,11 +555,13 @@ async def _send_action(websocket: WebSocket, action: dict):
             },
         })
     except Exception as e:
-        logger.warning(f"Failed to send action: {e}")
+        logger.debug(f"Failed to send action: {e}")
 
 
 async def _send_log(websocket: WebSocket, message: str):
     """Send a log/status update to the frontend."""
+    if not _ws_is_open(websocket):
+        return
     try:
         await websocket.send_json({
             "type": WSMessageType.LOG_UPDATE,
@@ -467,11 +571,13 @@ async def _send_log(websocket: WebSocket, message: str):
             },
         })
     except Exception as e:
-        logger.warning(f"Failed to send log: {e}")
+        logger.debug(f"Failed to send log: {e}")
 
 
 async def _send_error(websocket: WebSocket, message: str):
     """Send an error to the frontend."""
+    if not _ws_is_open(websocket):
+        return
     try:
         await websocket.send_json({
             "type": WSMessageType.ERROR,
@@ -481,11 +587,13 @@ async def _send_error(websocket: WebSocket, message: str):
             },
         })
     except Exception as e:
-        logger.warning(f"Failed to send error: {e}")
+        logger.debug(f"Failed to send error: {e}")
 
 
 async def _send_complete(websocket: WebSocket, message: str):
     """Send a completion message to the frontend."""
+    if not _ws_is_open(websocket):
+        return
     try:
         await websocket.send_json({
             "type": "complete",
@@ -495,4 +603,4 @@ async def _send_complete(websocket: WebSocket, message: str):
             },
         })
     except Exception as e:
-        logger.warning(f"Failed to send complete: {e}")
+        logger.debug(f"Failed to send complete: {e}")

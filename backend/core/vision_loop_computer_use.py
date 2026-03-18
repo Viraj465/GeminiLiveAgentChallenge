@@ -614,6 +614,10 @@ async def _send_manual_message_with_retry(
 ) -> types.GenerateContentResponse:
     """
     Send contents via raw generate_content with retry + exponential backoff.
+
+    CancelledError is intentionally NOT caught here — it must propagate
+    immediately so the vision loop exits cleanly when the autopilot task
+    is cancelled (e.g. new user command or client disconnect).
     """
     last_error = None
     _contents = contents
@@ -629,6 +633,11 @@ async def _send_manual_message_with_retry(
                 timeout=GEMINI_TIMEOUT,
             )
             return response
+
+        except asyncio.CancelledError:
+            # Propagate immediately — do not retry on cancellation
+            logger.info("Gemini call cancelled (task was cancelled)")
+            raise
 
         except asyncio.TimeoutError:
             last_error = f"Gemini call timed out after {GEMINI_TIMEOUT}s"

@@ -18,18 +18,29 @@ Each step streams status updates to the frontend via WebSocket.
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
 
+def _ws_is_open(websocket: WebSocket) -> bool:
+    """Check if the WebSocket connection is still open."""
+    try:
+        return websocket.client_state.value == 1  # CONNECTED=1
+    except Exception:
+        return False
+
+
 async def _send_pipeline_status(websocket: WebSocket, stage: str, message: str, progress: float = 0.0):
     """Send a pipeline progress update to the frontend."""
+    if not _ws_is_open(websocket):
+        return
     try:
         await websocket.send_json({
             "type": "log_update",
-           "payload": {
+            "payload": {
                 "log": f"[Pipeline: {stage}] {message}",
                 "pipeline_stage": stage,
                 "pipeline_progress": progress,
@@ -37,7 +48,60 @@ async def _send_pipeline_status(websocket: WebSocket, stage: str, message: str, 
             },
         })
     except Exception as e:
-        logger.warning(f"Failed to send pipeline status: {e}")
+        logger.debug(f"Failed to send pipeline status: {e}")
+
+
+@asynccontextmanager
+async def _stage_keepalive(websocket: WebSocket, stage: str, interval: float = 25.0):
+    """
+    Context manager that sends a lightweight heartbeat every `interval` seconds
+    while a slow pipeline stage (synthesis, report generation) is running.
+
+    This prevents Cloud Run's 300 s request timeout from killing the container
+    during heavy Gemini API calls that can take 2-5 minutes per stage.
+
+    Usage:
+        async with _stage_keepalive(websocket, "SynthesisAgent"):
+            result = await slow_gemini_call(...)
+    """
+    _running = True
+    _elapsed = 0
+
+    async def _ping():
+        nonlocal _elapsed
+        try:
+            while _running:
+                await asyncio.sleep(interval)
+                if not _running:
+                    break
+                _elapsed += int(interval)
+                if _ws_is_open(websocket):
+                    try:
+                        await websocket.send_json({
+                            "type": "pipeline_heartbeat",
+                            "payload": {
+                                "message": f"[{stage}] Still working… ({_elapsed}s)",
+                                "stage": stage,
+                                "elapsed_seconds": _elapsed,
+                                "timestamp": time.time(),
+                            },
+                        })
+                        logger.debug(f"Stage keepalive [{stage}] sent ({_elapsed}s)")
+                    except Exception:
+                        break  # WebSocket closed — stop pinging
+        except asyncio.CancelledError:
+            pass
+
+    ping_task = asyncio.create_task(_ping())
+    try:
+        yield
+    finally:
+        _running = False
+        ping_task.cancel()
+        try:
+            await asyncio.wait_for(ping_task, timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
 
 
 async def run_adk_pipeline(
@@ -118,17 +182,18 @@ async def run_adk_pipeline(
         )
 
         # Notify frontend that GCS + context caching may be used
-        try:
-            await websocket.send_json({
-                "type": "gcs_status",
-                "payload": {
-                    "status": "uploading_to_gcs",
-                    "message": "Streaming PDFs to Google Cloud Storage for context caching...",
-                    "timestamp": time.time(),
-                },
-            })
-        except Exception:
-            pass
+        if _ws_is_open(websocket):
+            try:
+                await websocket.send_json({
+                    "type": "gcs_status",
+                    "payload": {
+                        "status": "uploading_to_gcs",
+                        "message": "Streaming PDFs to Google Cloud Storage for context caching...",
+                        "timestamp": time.time(),
+                    },
+                })
+            except Exception:
+                pass
 
         from agents.extractionagent.extraction_agent import _extract_in_batches
 
@@ -142,29 +207,30 @@ async def run_adk_pipeline(
         pymupdf_count = sum(1 for e in extractions if e.get("extraction_method") == "pdf_multimodal")
         hybrid_count = sum(1 for e in extractions if e.get("extraction_method") == "hybrid_analysis")
 
-        try:
-            method_parts = []
-            if pymupdf_count:
-                method_parts.append(f"{pymupdf_count} via PyMuPDF")
-            if cache_count:
-                method_parts.append(f"{cache_count} via Gemini Context Cache")
-            if hybrid_count:
-                method_parts.append(f"{hybrid_count} via Hybrid Analysis (PDF + Vision)")
-            method_summary = ", ".join(method_parts) if method_parts else "abstract-only fallback"
+        if _ws_is_open(websocket):
+            try:
+                method_parts = []
+                if pymupdf_count:
+                    method_parts.append(f"{pymupdf_count} via PyMuPDF")
+                if cache_count:
+                    method_parts.append(f"{cache_count} via Gemini Context Cache")
+                if hybrid_count:
+                    method_parts.append(f"{hybrid_count} via Hybrid Analysis (PDF + Vision)")
+                method_summary = ", ".join(method_parts) if method_parts else "abstract-only fallback"
 
-            await websocket.send_json({
-                "type": "cache_status",
-                "payload": {
-                    "status": "cache_ready",
-                    "message": f"Extraction complete: {method_summary}.",
-                    "cache_count": cache_count,
-                    "pymupdf_count": pymupdf_count,
-                    "hybrid_count": hybrid_count,
-                    "timestamp": time.time(),
-                },
-            })
-        except Exception:
-            pass
+                await websocket.send_json({
+                    "type": "cache_status",
+                    "payload": {
+                        "status": "cache_ready",
+                        "message": f"Extraction complete: {method_summary}.",
+                        "cache_count": cache_count,
+                        "pymupdf_count": pymupdf_count,
+                        "hybrid_count": hybrid_count,
+                        "timestamp": time.time(),
+                    },
+                })
+            except Exception:
+                pass
 
         await _send_pipeline_status(
             websocket, "ExtractionAgent",
@@ -203,9 +269,11 @@ async def run_adk_pipeline(
 
         from agents.synthesisagent.synthesis_agent import synthesize_findings
 
-        synthesis_result = await asyncio.to_thread(
-            synthesize_findings, extractions, task
-        )
+        # Wrap in keepalive — synthesis can take 2-4 min on large corpora
+        async with _stage_keepalive(websocket, "SynthesisAgent"):
+            synthesis_result = await asyncio.to_thread(
+                synthesize_findings, extractions, task
+            )
         synthesis_text = synthesis_result.get("synthesis", "")
 
         await _send_pipeline_status(
@@ -303,12 +371,14 @@ async def run_adk_pipeline(
             # Fallback: use synthesis text itself
             extracted_texts["Synthesis Summary"] = synthesis_text
 
-        report_markdown = await generate_literature_review(
-            topic=task,
-            extracted_texts=extracted_texts,
-            synthesis=synthesis_text,
-            graph=graph_data,
-        )
+        # Wrap in keepalive — report generation can take 3-6 min for large reviews
+        async with _stage_keepalive(websocket, "ReportAgent"):
+            report_markdown = await generate_literature_review(
+                topic=task,
+                extracted_texts=extracted_texts,
+                synthesis=synthesis_text,
+                graph=graph_data,
+            )
         result["report_markdown"] = report_markdown
 
         await _send_pipeline_status(
@@ -337,29 +407,34 @@ async def run_adk_pipeline(
             cleanup_tasks = [delete_paper_cache(name) for name in cache_names_to_delete]
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
-            try:
-                await websocket.send_json({
-                    "type": "cache_status",
-                    "payload": {
-                        "status": "cache_deleted",
-                        "message": f"Cleaned up {len(cache_names_to_delete)} context cache(s). Billing stopped.",
-                        "timestamp": time.time(),
-                    },
-                })
-            except Exception:
-                pass
+            if _ws_is_open(websocket):
+                try:
+                    await websocket.send_json({
+                        "type": "cache_status",
+                        "payload": {
+                            "status": "cache_deleted",
+                            "message": f"Cleaned up {len(cache_names_to_delete)} context cache(s). Billing stopped.",
+                            "timestamp": time.time(),
+                        },
+                    })
+                except Exception:
+                    pass
 
             logger.info(f"Cleanup complete: deleted {len(cache_names_to_delete)} context cache(s).")
 
-        
-        # Save to Firestore
-        
+        # ── Persist results to Firestore (always runs, even if WebSocket is closed) ──
+        # This ensures results survive client disconnects and are available on reconnect.
         try:
             from core.db import save_session_data
-            asyncio.create_task(save_session_data(session_id, "graph_data", graph_data))
-            asyncio.create_task(save_session_data(session_id, "report_markdown", report_markdown))
-            asyncio.create_task(save_session_data(session_id, "papers_found", len(all_papers)))
-            asyncio.create_task(save_session_data(session_id, "papers_extracted", extracted_count))
+            await asyncio.gather(
+                save_session_data(session_id, "query", task),
+                save_session_data(session_id, "graph_data", graph_data),
+                save_session_data(session_id, "report_markdown", report_markdown),
+                save_session_data(session_id, "papers_found", len(all_papers)),
+                save_session_data(session_id, "papers_extracted", extracted_count),
+                return_exceptions=True,
+            )
+            logger.info(f"Session {session_id}: results persisted to Firestore.")
         except Exception as e:
             logger.warning(f"Firestore save failed (non-fatal): {e}")
 

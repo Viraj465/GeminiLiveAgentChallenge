@@ -60,6 +60,7 @@ out/
 .turbo/
 .vercel/
 .cache/
+*.json
 
 # --- Environment Secrets ---
 .env

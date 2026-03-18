@@ -1455,9 +1455,60 @@ When reading a paper (URL contains /pdf/, /abs/, /article/):
                 }
 
             elif action.get("action") == "ask_user":
-                yield {"action": "ask_user", "reason": "CAPTCHA detected.", "step": step, "captcha_mode": True}
-                await asyncio.sleep(30)
-                func_response_payload = {"status": "success", "message": "CAPTCHA resolved by user."}
+                # ── CAPTCHA handling: redirect to alternative instead of waiting ──
+                reason_lower = action.get("reason", "").lower()
+                is_captcha_ask = any(kw in reason_lower for kw in [
+                    "captcha", "recaptcha", "hcaptcha", "cloudflare",
+                    "verify you are human", "not a robot", "challenge"
+                ])
+                
+                current_url_for_captcha = browser.page.url if browser.page else ""
+                is_google_captcha = "google.com/sorry" in current_url_for_captcha or "/sorry/" in current_url_for_captcha
+                
+                if is_captcha_ask or is_google_captcha:
+                    logger.warning(f"Step {step}: CAPTCHA detected — redirecting to alternative search source")
+                    yield {
+                        "action": "ask_user",
+                        "reason": "🔒 CAPTCHA detected on Google. Automatically switching to alternative search source (DuckDuckGo).",
+                        "step": step,
+                        "captcha_mode": True,
+                        "captcha_auto_redirect": True,
+                    }
+                    # Auto-redirect to DuckDuckGo — no waiting for user
+                    try:
+                        await browser.page.goto("https://duckduckgo.com", wait_until="domcontentloaded", timeout=15000)
+                        await asyncio.sleep(1.5)
+                        new_url_after_redirect = browser.page.url if browser.page else "https://duckduckgo.com"
+                        logger.info(f"Step {step}: Redirected to DuckDuckGo: {new_url_after_redirect}")
+                        # Reset action fingerprints — new page, fresh start
+                        action_fingerprints.clear()
+                        consecutive_scrolls = 0
+                        consecutive_go_backs = 0
+                        func_response_payload = {
+                            "status": "success",
+                            "message": (
+                                "Google showed a CAPTCHA and blocked the search. "
+                                "I have automatically navigated to DuckDuckGo as an alternative. "
+                                f"Current URL: {new_url_after_redirect}\n\n"
+                                "IMPORTANT: You are now on DuckDuckGo. "
+                                "Click the search input field and type your search query there. "
+                                "DuckDuckGo works the same as Google for academic searches. "
+                                "Do NOT try to navigate back to Google — use DuckDuckGo instead."
+                            ),
+                            "captcha_redirected": True,
+                            "url": new_url_after_redirect,
+                        }
+                    except Exception as redirect_err:
+                        logger.error(f"Step {step}: DuckDuckGo redirect failed: {redirect_err}")
+                        func_response_payload = {
+                            "status": "error",
+                            "error": f"CAPTCHA on Google and redirect to DuckDuckGo failed: {redirect_err}. Try navigating to https://arxiv.org directly.",
+                        }
+                else:
+                    # Non-CAPTCHA ask_user — wait briefly
+                    yield {"action": "ask_user", "reason": action.get("reason", ""), "step": step}
+                    await asyncio.sleep(10)
+                    func_response_payload = {"status": "success", "message": "Continuing after user action."}
 
             elif action.get("_unknown"):
                 func_response_payload = {"status": "error", "error": f"Unknown action '{fc.name}' — not supported."}
@@ -1478,6 +1529,46 @@ When reading a paper (URL contains /pdf/, /abs/, /article/):
                 if _record_url(post_url):
                     logger.debug(f"Step {step}: New URL visited: {post_url}")
                     yield {"action": "url_visited", "url": post_url, "step": step}
+                
+                # ── CAPTCHA auto-detection after navigation ──
+                # If we land on a Google /sorry/ page after any action, auto-redirect
+                _is_captcha_after_action = (
+                    "google.com/sorry" in post_url
+                    or "/sorry/index" in post_url
+                    or (hasattr(browser, 'is_on_captcha_page') and browser.is_on_captcha_page())
+                )
+                if _is_captcha_after_action:
+                    logger.warning(f"Step {step}: Landed on CAPTCHA page ({post_url}) — auto-redirecting to DuckDuckGo")
+                    yield {
+                        "action": "captcha_detected",
+                        "url": post_url,
+                        "step": step,
+                        "reason": "Google CAPTCHA detected — auto-redirecting to DuckDuckGo",
+                    }
+                    try:
+                        await browser.page.goto("https://duckduckgo.com", wait_until="domcontentloaded", timeout=15000)
+                        await asyncio.sleep(1.5)
+                        post_url = browser.page.url if browser.page else "https://duckduckgo.com"
+                        # Reset fingerprints to prevent false loop detection
+                        action_fingerprints.clear()
+                        consecutive_scrolls = 0
+                        consecutive_go_backs = 0
+                        func_response_payload = {
+                            "status": "success",
+                            "message": (
+                                "Google blocked the request with a CAPTCHA. "
+                                "I have automatically navigated to DuckDuckGo. "
+                                f"Current URL: {post_url}\n\n"
+                                "Use DuckDuckGo to search for the research papers. "
+                                "Click the search input and type your query."
+                            ),
+                            "captcha_redirected": True,
+                            "url": post_url,
+                        }
+                        pending_responses.append((fc, func_response_payload))
+                        continue
+                    except Exception as captcha_redirect_err:
+                        logger.error(f"Step {step}: CAPTCHA redirect failed: {captcha_redirect_err}")
 
                 # ── Paper found detection ──
                 _paper_landing_patterns = ["/abs/", "/pdf/", "/article/", "/paper/", ".pdf"]

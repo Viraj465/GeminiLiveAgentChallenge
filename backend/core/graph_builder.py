@@ -229,6 +229,7 @@ def _llm_match_citations(
     try:
         from google import genai
         from config import settings
+        from prompts import CITATION_MATCHING_PROMPT
 
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
@@ -242,35 +243,11 @@ def _llm_match_citations(
         # Truncate ref_block to stay within token budget
         ref_sample = ref_block[:6000]
 
-        prompt = f"""You are a citation matching assistant for academic literature.
-
-Below is the REFERENCE SECTION (or tail text) extracted from a paper titled: "{source_title}"
-
-REFERENCE SECTION:
-{ref_sample}
-
----
-
-Below is a numbered list of papers from our research corpus:
-
-CORPUS:
-{corpus_text}
-
----
-
-TASK: Identify which papers from the CORPUS appear to be cited or referenced in the REFERENCE SECTION above.
-
-MATCHING RULES (be LIBERAL — err on the side of inclusion):
-- Match on ANY of: partial title words, author last names, publication year, or topic similarity
-- A paper is a match if 2 or more significant title words appear anywhere in the reference section
-- A paper is a match if an author's last name AND year both appear near each other in the reference section
-- Do NOT require an exact or complete title match
-- If a paper's topic is clearly related and its author or year appears, include it
-
-Return ONLY a JSON array of the integer indices (from the CORPUS list) that are cited or likely cited.
-Example output: [0, 3, 7]
-If none are found, return: []
-Return ONLY the JSON array, no explanation, no markdown."""
+        prompt = CITATION_MATCHING_PROMPT.format(
+            source_title=source_title,
+            ref_sample=ref_sample,
+            corpus_text=corpus_text
+        )
 
         response = client.models.generate_content(
             model=settings.GOOGLE_REASONING_MODEL,

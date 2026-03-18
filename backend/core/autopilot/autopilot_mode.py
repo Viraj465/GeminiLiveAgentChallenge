@@ -69,9 +69,19 @@ async def run_autopilot(
 
         if use_stealth:
             logger.info("Autopilot: Using StealthBrowserController (stealth-only mode)")
-            browser = StealthBrowserController()
-            await browser.start(headless=settings.BROWSER_HEADLESS)
-            logger.info("✅ Stealth browser started successfully")
+            try:
+                browser = StealthBrowserController()
+                await browser.start(headless=settings.BROWSER_HEADLESS)
+                logger.info("✅ Stealth browser started successfully")
+            except Exception as stealth_err:
+                logger.warning(
+                    f"StealthBrowserController failed: {stealth_err}. "
+                    "Falling back to standard BrowserController."
+                )
+                await _send_log(websocket, "⚠️ Stealth browser unavailable — using standard browser.")
+                browser = BrowserController()
+                await browser.start()
+                logger.info("✅ Standard browser started as fallback")
         else:
             logger.info("Autopilot: Using standard BrowserController")
             browser = BrowserController()

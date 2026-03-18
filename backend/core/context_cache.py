@@ -1,29 +1,3 @@
-"""
-context_cache.py — Gemini Context Caching for full-paper deep analysis.
-
-Replaces the 30-50 screenshot scroll loop with:
-  1. One cache creation call  (loads entire PDF into Gemini memory)
-  2. 5-8 targeted Q&A calls   (extract structured provenance data)
-  3. One cache deletion call  (cleanup + stop billing)
-
-The cache holds the entire multimodal PDF — text, figures, tables, diagrams —
-so every query gets full-document context at a fraction of the token cost.
-
-Provenance schema per extracted claim:
-  {
-    "claim":           str,   # The factual statement
-    "section":         str,   # Section heading (e.g. "Results", "Methodology")
-    "page":            int,   # Page number in the PDF
-    "paragraph_index": int,   # Paragraph index within the section (0-based)
-    "evidence_type":   str,   # "metric" | "method" | "limitation" | "figure" | "table"
-    "dataset":         str,   # Dataset name if applicable
-    "hardware":        str,   # Hardware/compute if applicable
-    "limitation":      str,   # Limitation text if evidence_type == "limitation"
-    "raw_quote":       str,   # Verbatim sentence from the paper
-    "bounding_box":    dict   # {x, y, width, height} normalized 0-1, for figures/tables
-  }
-"""
-
 import asyncio
 import logging
 import json
@@ -34,6 +8,7 @@ from google import genai
 from google.genai import types
 
 from config import settings
+from prompts import CONTEXT_CACHE_SYSTEM_INSTRUCTION
 
 logger = logging.getLogger(__name__)
 
@@ -208,12 +183,7 @@ async def create_paper_cache(gcs_uri: str, title: str = "") -> str | None:
                         ],
                     )
                 ],
-                system_instruction=(
-                    "You are an expert academic researcher analyzing a research paper. "
-                    "The full PDF of the paper is loaded in your context. "
-                    "Answer all questions with precise page numbers, section headings, "
-                    "and verbatim quotes. Always return valid JSON as instructed."
-                ),
+                system_instruction=CONTEXT_CACHE_SYSTEM_INSTRUCTION,
                 ttl=f"{settings.CONTEXT_CACHE_TTL_SECONDS}s",
                 display_name=f"paper_cache_{title[:40].replace(' ', '_')}",
             ),

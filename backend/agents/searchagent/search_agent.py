@@ -38,6 +38,8 @@ from typing import Optional
 import httpx
 from sentence_transformers import CrossEncoder
 
+from prompts import SEARCH_PLANNING_PROMPT, SEARCH_GAP_IDENTIFICATION_PROMPT
+
 logger = logging.getLogger(__name__)
 
 # Constants 
@@ -75,20 +77,7 @@ async def _plan_subqueries(query: str) -> list[str]:
 
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-        prompt = f"""You are a research planning assistant.
-
-Given the research query below, generate {MAX_SUBQUERIES} focused sub-queries that together
-provide comprehensive coverage of the topic. Each sub-query should target a different angle:
-1. Core methodology / technical approach
-2. Real-world applications / use cases
-3. Comparative analysis / benchmarks / SOTA
-4. Recent advances (last 2-3 years)
-5. Limitations, critiques, or open problems
-
-Research Query: "{query}"
-
-Return ONLY a JSON array of {MAX_SUBQUERIES} strings. No explanation.
-Example: ["sub-query 1", "sub-query 2", "sub-query 3", "sub-query 4", "sub-query 5"]"""
+        prompt = SEARCH_PLANNING_PROMPT.format(max_subqueries=MAX_SUBQUERIES, query=query)
 
         response = client.models.generate_content(
             model=settings.GOOGLE_REASONING_MODEL,
@@ -606,20 +595,11 @@ async def _identify_gaps(query: str, papers: list[dict]) -> list[str]:
             for p in papers[:30]
         )
 
-        prompt = f"""You are a research gap analyst.
-
-Original research query: "{query}"
-
-Papers collected so far:
-{corpus_summary}
-
-Identify up to {MAX_GAP_QUERIES} important perspectives, methodologies, or sub-topics
-that are NOT covered by the papers above but are highly relevant to the query.
-For each gap, write a specific search query that would find papers covering it.
-
-Return ONLY a JSON array of search query strings (max {MAX_GAP_QUERIES} items).
-If no significant gaps exist, return [].
-Example: ["transformer efficiency benchmarks 2024", "federated learning privacy guarantees"]"""
+        prompt = SEARCH_GAP_IDENTIFICATION_PROMPT.format(
+            query=query,
+            corpus_summary=corpus_summary,
+            max_gap_queries=MAX_GAP_QUERIES
+        )
 
         response = client.models.generate_content(
             model=settings.GOOGLE_REASONING_MODEL,

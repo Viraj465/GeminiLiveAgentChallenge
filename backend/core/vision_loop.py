@@ -749,6 +749,42 @@ async def run_vision_loop(
         # 1. Capture current screen
         screenshot_b64 = await browser.screenshot_b64()
 
+        # ── CAPTCHA / Google Sorry page auto-escape ──
+        # If we land on Google's /sorry/ CAPTCHA page, immediately redirect
+        # to DuckDuckGo instead of letting the agent loop on the same URL.
+        current_url = browser.page.url if browser.page else ""
+        _is_google_captcha = (
+            "google.com/sorry" in current_url
+            or "/sorry/index" in current_url
+            or (hasattr(browser, 'is_on_captcha_page') and browser.is_on_captcha_page())
+        )
+        if _is_google_captcha:
+            logger.warning(f"Step {step + 1}: Google CAPTCHA page detected ({current_url}) — auto-redirecting to DuckDuckGo")
+            await browser.remove_grid()
+            try:
+                await browser.page.goto("https://duckduckgo.com", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(1.5)
+            except Exception as _captcha_redirect_err:
+                logger.error(f"DuckDuckGo redirect failed: {_captcha_redirect_err}")
+            # Reset loop detection state — fresh page, fresh start
+            action_fingerprints.clear()
+            same_url_steps = 0
+            last_seen_url = browser.page.url if browser.page else ""
+            history.append(f"Step {step + 1}: Google CAPTCHA detected — redirected to DuckDuckGo")
+            if len(history) > 10:
+                history = history[-10:]
+            screenshot_b64 = await browser.screenshot_b64()
+            recent_frames.append({
+                "step": step + 1,
+                "frame": screenshot_b64,
+                "action_summary": '{"action": "navigate", "reason": "CAPTCHA redirect to DuckDuckGo"}',
+            })
+            if len(recent_frames) > 3:
+                recent_frames = recent_frames[-3:]
+            last_step_frame = screenshot_b64
+            step += 1
+            continue
+
         # ── Blocked-domain auto-escape ──
         # Must remove_grid BEFORE go_back — otherwise the grid overlay is
         # injected into a page we're about to leave and never cleaned up.

@@ -1,23 +1,3 @@
-"""
-paper_analyzer.py — In-memory PDF analysis with chunked summarization and
-multimodal screenshot evidence collection.
-
-This module replaces the old "scroll through entire paper via vision loop"
-approach with a hybrid strategy:
-
-  1. Download PDF once into RAM (zero disk I/O)
-  2. Extract full text + section map + citation strings + figure/table captions
-  3. Chunk long papers by section/token budget
-  4. Run hierarchical summarization (map → reduce → final synthesis)
-  5. Analyze selected vision screenshots (diagrams, graphs, tables, key figures)
-  6. Produce an enriched paper object with all evidence attached
-
-Long-paper policy:
-  - Priority sections: abstract, intro, method, results, conclusion, references
-  - Per-paper token ceiling enforced before moving to next paper
-  - Low-value sections (acknowledgments, appendix) deferred if budget is tight
-"""
-
 import asyncio
 import base64
 import logging
@@ -26,10 +6,11 @@ import re
 from io import BytesIO
 from typing import Any
 
-import fitz  # PyMuPDF
+import fitz
 import httpx
 
 from config import settings
+from prompts import PAPER_CHUNK_SUMMARIZATION_PROMPT, PAPER_REDUCE_SUMMARIZATION_PROMPT, VISION_SCREENSHOT_ANALYSIS_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -347,20 +328,7 @@ async def summarize_chunk(chunk_text: str, paper_title: str, query: str = "") ->
     client = _get_gemini_client()
     model_name = settings.GOOGLE_REASONING_MODEL
 
-    prompt = f"""You are analyzing a section of the academic paper: "{paper_title}"
-Research context: {query}
-
-Extract the following from this text chunk:
-1. Key claims with specific numeric results (accuracy, F1, etc.)
-2. Methodology details (datasets, models, baselines)
-3. Limitations or caveats mentioned
-4. Any figures/tables referenced and their key findings
-
-Be precise and include exact numbers. Keep your summary under 500 words.
-
-TEXT:
-{chunk_text[:10000]}
-"""
+    prompt = PAPER_CHUNK_SUMMARIZATION_PROMPT.format(paper_title=paper_title, query=query) + f"\n\nTEXT:\n{chunk_text[:10000]}"
 
     try:
         response = await asyncio.wait_for(
@@ -400,24 +368,7 @@ async def reduce_summaries(
         f"[Chunk {i+1}]\n{s}" for i, s in enumerate(chunk_summaries) if s
     )
 
-    prompt = f"""You are synthesizing section summaries from the paper: "{paper_title}"
-Research context: {query}
-
-Below are summaries from different sections of the paper. Combine them into a single
-coherent analysis that covers:
-
-1. **Core Contribution**: What is the paper's main contribution? (1-2 sentences)
-2. **Methodology**: What approach/model/algorithm is used? What datasets?
-3. **Key Results**: All quantitative results with exact numbers and metrics
-4. **Comparisons**: How does it compare to baselines/prior work?
-5. **Limitations**: What limitations do the authors acknowledge?
-6. **Figures/Tables**: Key visual evidence referenced
-
-Be precise. Include all numeric values. Do not add information not present in the summaries.
-
-SECTION SUMMARIES:
-{combined[:15000]}
-"""
+    prompt = PAPER_REDUCE_SUMMARIZATION_PROMPT.format(paper_title=paper_title, query=query) + f"\n\nSECTION SUMMARIES:\n{combined[:15000]}"
 
     try:
         response = await asyncio.wait_for(
@@ -510,7 +461,6 @@ async def analyze_vision_screenshots(
     client = _get_gemini_client()
     model_name = settings.GOOGLE_VISION_MODEL
 
-    # Limit to MAX_VISION_SCREENSHOTS
     selected = screenshots[:MAX_VISION_SCREENSHOTS]
     results = []
 
@@ -521,18 +471,7 @@ async def analyze_vision_screenshots(
         if not jpeg_bytes:
             continue
 
-        prompt = f"""You are analyzing a screenshot from the academic paper: "{paper_title}"
-This screenshot shows the "{label}" section/area of the paper.
-
-Extract:
-1. All visible text content (key sentences, not OCR of every word)
-2. Any figures, graphs, or charts visible — describe what they show quantitatively
-3. Any tables visible — extract key data points
-4. Key numeric results or metrics visible
-
-Be precise and include exact numbers. Focus on research-relevant content only.
-Keep your response under 300 words.
-"""
+        prompt = VISION_SCREENSHOT_ANALYSIS_PROMPT.format(paper_title=paper_title, label=label)
 
         try:
             response = await asyncio.wait_for(

@@ -74,10 +74,23 @@ class BrowserController:
         # ---------------------------------------------------------
         logger.info("Starting Playwright browser...")
         
+        # Cloud Run / Docker compatible flags
+        chrome_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-setuid-sandbox",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-features=VizDisplayCompositor",
+        ]
+
         if is_async:
             self.browser = await self._playwright.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
+                args=chrome_args
             )
             self.context = await self.browser.new_context()
             self.page = await self.context.new_page()
@@ -85,7 +98,7 @@ class BrowserController:
         else:
             self.browser = self._playwright.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
+                args=chrome_args
             )
             self.context = self.browser.new_context()
             self.page = self.context.new_page()

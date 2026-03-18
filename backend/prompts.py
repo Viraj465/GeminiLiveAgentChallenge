@@ -1127,3 +1127,102 @@ Blank page with no visible content:
 3. if still blank after refresh → navigate to https://arxiv.org
 
 """
+
+CONTEXT_CACHE_SYSTEM_INSTRUCTION = """You are an expert academic researcher analyzing a research paper. The full PDF of the paper is loaded in your context. Answer all questions with precise page numbers, section headings, and verbatim quotes. Always return valid JSON as instructed."""
+
+PAPER_CHUNK_SUMMARIZATION_PROMPT = """You are analyzing a section of the academic paper: "{paper_title}"
+Research context: {query}
+
+Extract the following from this text chunk:
+1. Key claims with specific numeric results (accuracy, F1, etc.)
+2. Methodology details (datasets, models, baselines)
+3. Limitations or caveats mentioned
+4. Any figures/tables referenced and their key findings
+
+Be precise and include exact numbers. Keep your summary under 500 words."""
+
+PAPER_REDUCE_SUMMARIZATION_PROMPT = """You are synthesizing section summaries from the paper: "{paper_title}"
+Research context: {query}
+
+Below are summaries from different sections of the paper. Combine them into a single coherent analysis that covers:
+
+1. **Core Contribution**: What is the paper's main contribution? (1-2 sentences)
+2. **Methodology**: What approach/model/algorithm is used? What datasets?
+3. **Key Results**: All quantitative results with exact numbers and metrics
+4. **Comparisons**: How does it compare to baselines/prior work?
+5. **Limitations**: What limitations do the authors acknowledge?
+6. **Figures/Tables**: Key visual evidence referenced
+
+Be precise. Include all numeric values. Do not add information not present in the summaries."""
+
+VISION_SCREENSHOT_ANALYSIS_PROMPT = """You are analyzing a screenshot from the academic paper: "{paper_title}"
+This screenshot shows the "{label}" section/area of the paper.
+
+Extract:
+1. All visible text content (key sentences, not OCR of every word)
+2. Any figures, graphs, or charts visible — describe what they show quantitatively
+3. Any tables visible — extract key data points
+4. Key numeric results or metrics visible
+
+Be precise and include exact numbers. Focus on research-relevant content only.
+Keep your response under 300 words."""
+
+SEARCH_PLANNING_PROMPT = """You are a research planning assistant.
+
+Given the research query below, generate {max_subqueries} focused sub-queries that together
+provide comprehensive coverage of the topic. Each sub-query should target a different angle:
+1. Core methodology / technical approach
+2. Real-world applications / use cases
+3. Comparative analysis / benchmarks / SOTA
+4. Recent advances (last 2-3 years)
+5. Limitations, critiques, or open problems
+
+Research Query: "{query}"
+
+Return ONLY a JSON array of {max_subqueries} strings. No explanation.
+Example: ["sub-query 1", "sub-query 2", "sub-query 3", "sub-query 4", "sub-query 5"]"""
+
+SEARCH_GAP_IDENTIFICATION_PROMPT = """You are a research gap analyst.
+
+Original research query: "{query}"
+
+Papers collected so far:
+{corpus_summary}
+
+Identify up to {max_gap_queries} important perspectives, methodologies, or sub-topics
+that are NOT covered by the papers above but are highly relevant to the query.
+For each gap, write a specific search query that would find papers covering it.
+
+Return ONLY a JSON array of search query strings (max {max_gap_queries} items).
+If no significant gaps exist, return [].
+Example: ["transformer efficiency benchmarks 2024", "federated learning privacy guarantees"]"""
+
+CITATION_MATCHING_PROMPT = """You are a citation matching assistant for academic literature.
+
+Below is the REFERENCE SECTION (or tail text) extracted from a paper titled: "{source_title}"
+
+REFERENCE SECTION:
+{ref_sample}
+
+---
+
+Below is a numbered list of papers from our research corpus:
+
+CORPUS:
+{corpus_text}
+
+---
+
+TASK: Identify which papers from the CORPUS appear to be cited or referenced in the REFERENCE SECTION above.
+
+MATCHING RULES (be LIBERAL — err on the side of inclusion):
+- Match on ANY of: partial title words, author last names, publication year, or topic similarity
+- A paper is a match if 2 or more significant title words appear anywhere in the reference section
+- A paper is a match if an author's last name AND year both appear near each other in the reference section
+- Do NOT require an exact or complete title match
+- If a paper's topic is clearly related and its author or year appears, include it
+
+Return ONLY a JSON array of the integer indices (from the CORPUS list) that are cited or likely cited.
+Example output: [0, 3, 7]
+If none are found, return: []
+Return ONLY the JSON array, no explanation, no markdown."""

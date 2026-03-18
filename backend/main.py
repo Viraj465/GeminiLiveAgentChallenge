@@ -1,5 +1,8 @@
+import asyncio
 import json
 import logging
+import sys
+
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from ws_handlers.handler import websocket_endpoint
@@ -13,9 +16,8 @@ from config import settings
 from agents.coordinator import coordinator
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-import sys
+
 if sys.platform == "win32":
-    import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 
@@ -104,12 +106,20 @@ async def ws_route(websocket: WebSocket, session_id: str, user_id: str = Depends
 async def agent_websocket(websocket: WebSocket):
     await websocket.accept()
     
-    # Choose browser based on configuration
+    # Choose browser based on configuration, with automatic fallback
     if settings.USE_STEALTH_BROWSER:
         logger.info("🔒 Using Stealth Browser (SeleniumBase + Playwright)")
-        browser = StealthBrowserController()
-        await browser.start(headless=settings.BROWSER_HEADLESS)
-        # await browser.start()
+        try:
+            browser = StealthBrowserController()
+            await browser.start(headless=settings.BROWSER_HEADLESS)
+        except Exception as stealth_err:
+            logger.warning(f"Stealth browser failed: {stealth_err}. Falling back to standard browser.")
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "message": "⚠️ Stealth browser unavailable — using standard browser."
+            }))
+            browser = BrowserController()
+            await browser.start()
     else:
         logger.info("Using Standard Browser (Playwright only)")
         browser = BrowserController()
@@ -135,7 +145,47 @@ async def agent_websocket(websocket: WebSocket):
         }))
 
         # Pre-navigate to Google to avoid blank screen loops
-        await browser.page.goto("https://google.com", wait_until="networkidle")
+        # Use random delay before navigation to appear more human-like
+        import random as _random
+        await asyncio.sleep(_random.uniform(0.5, 1.5))
+        
+        try:
+            await browser.page.goto("https://google.com", wait_until="networkidle")
+        except Exception as nav_err:
+            logger.warning(f"Google navigation partial: {nav_err}")
+            try:
+                await browser.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception:
+                pass
+        
+        # ── CAPTCHA Detection: Check if Google blocked us ──
+        # On Cloud Run, Google frequently shows /sorry/ CAPTCHA page.
+        # If detected, immediately redirect to an alternative search engine
+        # that doesn't block automated browsers.
+        captcha_detected = False
+        if hasattr(browser, 'is_on_captcha_page') and browser.is_on_captcha_page():
+            captcha_detected = True
+        elif hasattr(browser, 'detect_captcha_in_page'):
+            try:
+                captcha_detected = await browser.detect_captcha_in_page()
+            except Exception:
+                pass
+        
+        if captcha_detected:
+            logger.warning("🔒 Google CAPTCHA detected on initial navigation! Redirecting to DuckDuckGo...")
+            await websocket.send_text(json.dumps({
+                "type": "status",
+                "message": "⚠️ Google CAPTCHA detected — switching to DuckDuckGo search to avoid blocking."
+            }))
+            # Use DuckDuckGo as fallback — it doesn't block automated browsers
+            try:
+                await browser.page.goto("https://duckduckgo.com", wait_until="networkidle")
+            except Exception:
+                try:
+                    await browser.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
         
         # Choose vision loop based on configuration
         if settings.USE_COMPUTER_USE:

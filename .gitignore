@@ -84,4 +84,4 @@ Thumbs.db
 # --- Project Specific ---
 backend/project-*.json
 frontend/dist/
-backend/.pytest_cache/
+backend/.pytest_cache/project-*.json
